@@ -89,6 +89,30 @@ class TestEveryEndpoint(unittest.TestCase):
         self.assertIsNotNone(api.events())
         self.assertIsNotNone(api.trace("sale", self.deal_id))
 
+    def test_counterparties(self):
+        # name, phone and location, plus the guard that stops a party with
+        # history being deleted out from under its deals
+        before = len(api.list_parties()["parties"])
+        made = api.save_party(api.PartyIn(
+            name="Test Counterparty", phone="+91 90000 00000", city="Surat",
+            is_customer=True, is_supplier=False))
+        self.assertEqual(len(made["parties"]), before + 1)
+        row = [p for p in made["parties"] if p["id"] == made["id"]][0]
+        self.assertEqual((row["phone"], row["city"], row["is_customer"]),
+                         ("+91 90000 00000", "Surat", 1))
+
+        api.save_party(api.PartyIn(id=made["id"], name="Test Counterparty",
+                                   phone="+91 91111 11111", city="Vapi", is_customer=True))
+        row = [p for p in api.list_parties()["parties"] if p["id"] == made["id"]][0]
+        self.assertEqual((row["phone"], row["city"]), ("+91 91111 11111", "Vapi"))
+
+        used = db.q1("SELECT party_id FROM deals WHERE status != 'cancelled' LIMIT 1")["party_id"]
+        with self.assertRaises(ValueError):
+            api.remove_party(used)
+
+        api.remove_party(made["id"])
+        self.assertEqual(len(api.list_parties()["parties"]), before)
+
     def test_sell_preview(self):
         plan = api.preview_sell(api.PreviewIn(sku_id=self.sku_id, qty="1 MT", rate="120"))
         self.assertIn("picks", plan)

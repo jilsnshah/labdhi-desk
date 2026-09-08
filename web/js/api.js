@@ -94,6 +94,9 @@ export const api = {
   resolveSku: (material, grade, manufacturer) =>
     call('/api/catalog/resolve?' + qs({ material, grade, manufacturer })),
   catalogTree: () => call('/api/catalog/tree'),
+  partyList: q => call('/api/parties' + (q ? '?q=' + encodeURIComponent(q) : '')),
+  partySave: body => call('/api/parties', { method: 'POST', body }),
+  partyRemove: id => call(`/api/parties/${id}/remove`, { method: 'POST' }),
   addCatalog: body => call('/api/catalog/entry', { method: 'POST', body }),
   removeCatalog: body => call('/api/catalog/remove', { method: 'POST', body }),
   lots: skuId => call(`/api/lots/${skuId}`),

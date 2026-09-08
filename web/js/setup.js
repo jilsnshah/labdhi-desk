@@ -11,7 +11,7 @@ import { api } from './api.js';
 let openMaterial = null, openGrade = null, filter = '';
 
 export async function renderSetup(root, ctx) {
-  const { tree: all } = await api.catalogTree();
+  const [{ tree: all }, { parties }] = await Promise.all([api.catalogTree(), api.partyList()]);
   const term = filter.toLowerCase();
   const hit = (...parts) => !term || parts.some(x => (x || '').toLowerCase().includes(term));
   const tree = !term ? all : all
@@ -35,8 +35,56 @@ export async function renderSetup(root, ctx) {
     catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
   };
 
+  const saveParty = async (p, form) => {
+    try {
+      await api.partySave({ ...form, id: p ? p.id : undefined });
+      toast(p ? 'Saved' : `Added ${form.name}`);
+      refresh();
+    } catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
+  };
+  const dropParty = async p => {
+    if (!window.confirm(`Remove ${p.name}?`)) return;
+    try { await api.partyRemove(p.id); toast(`Removed ${p.name}`); refresh(); }
+    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
+  };
+
+  // A counterparty is a name, a phone and a place. Everything else about them
+  // the deals already say.
+  function partyRow(p) {
+    const name = h('input', { class: 'ghost-input', value: p ? p.name : '',
+      placeholder: 'Name', style: { textAlign: 'left', width: '220px', fontFamily: 'var(--sans)' } });
+    const phone = h('input', { class: 'ghost-input', value: p ? (p.phone || '') : '',
+      placeholder: 'Phone', style: { textAlign: 'left', width: '190px', fontFamily: 'var(--sans)' } });
+    const city = h('input', { class: 'ghost-input', value: p ? (p.city || '') : '',
+      placeholder: 'Location', style: { textAlign: 'left', width: '170px', fontFamily: 'var(--sans)' } });
+    const buyer = h('button', { class: 'chip' + (p && p.is_customer ? ' on' : ''),
+      onclick: e => e.target.classList.toggle('on') }, 'Buys from me');
+    const seller = h('button', { class: 'chip' + (p && p.is_supplier ? ' on' : ''),
+      onclick: e => e.target.classList.toggle('on') }, 'Sells to me');
+    const collect = () => ({
+      name: name.value.trim(), phone: phone.value.trim(), city: city.value.trim(),
+      is_customer: buyer.classList.contains('on'), is_supplier: seller.classList.contains('on')
+    });
+    return h('div', { class: 'party-row' }, name, phone, city, buyer, seller,
+      h('span', { class: 'dim', style: { marginLeft: 'auto', fontSize: '13px' } },
+        p ? (p.deal_count ? `${p.deal_count} deals` : 'unused') : ''),
+      h('button', { class: 'chip on', onclick: () => {
+        const form = collect();
+        if (!form.name) { toast('Name is required', { kind: 'err' }); return; }
+        saveParty(p, form);
+      } }, p ? 'Save' : 'Add'),
+      p ? h('button', { class: 'setup-x', onclick: () => dropParty(p) }, '×') : null);
+  }
+
   mount(view,
     h('div', { class: 'section-head' },
+      h('h2', {}, 'Buyers and sellers'), h('i', { class: 'rule' }),
+      h('span', { class: 'dim' }, `${parties.length} counterparties`)),
+    h('div', { class: 'party-list' },
+      partyRow(null),
+      ...parties.map(partyRow)),
+
+    h('div', { class: 'section-head', style: { marginTop: '34px' } },
       h('h2', {}, 'Materials, grades and manufacturers'), h('i', { class: 'rule' }),
       h('span', { class: 'dim' }, 'a manufacturer is who made the resin, not who you trade with')),
 

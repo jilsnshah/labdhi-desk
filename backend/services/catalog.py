@@ -50,6 +50,78 @@ def upsert_party(conn, name: str, role: Optional[str] = None, **fields) -> int:
     return pid
 
 
+def list_parties(term: str = "") -> List[Dict[str, Any]]:
+    """Everyone you trade with, for the Setup screen."""
+    where, args = [], []
+    if term:
+        where.append("(LOWER(p.name) LIKE ? OR LOWER(COALESCE(p.city,'')) LIKE ? "
+                     "OR COALESCE(p.phone,'') LIKE ?)")
+        t = "%%%s%%" % term.strip().lower()
+        args += [t, t, "%%%s%%" % term.strip()]
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    rows = db.q(
+        """SELECT * FROM (
+             SELECT p.*,
+                    (SELECT COUNT(*) FROM deals d WHERE d.party_id = p.id
+                     AND d.status != 'cancelled') AS deal_count,
+                    (SELECT MAX(d.deal_date) FROM deals d WHERE d.party_id = p.id
+                     AND d.status != 'cancelled') AS last_deal
+             FROM parties p {clause}
+           ) ranked
+           ORDER BY (last_deal IS NULL), last_deal DESC, deal_count DESC, name""".format(clause=clause),
+        args)
+    return [dict(r) for r in rows]
+
+
+def save_party(conn, name: str, phone: str = "", city: str = "",
+               is_supplier: bool = False, is_customer: bool = False,
+               party_id: Optional[int] = None) -> int:
+    """Create or edit a counterparty. Name, phone and location, nothing more -
+    everything else about them is already implied by their deals."""
+    name = clean(name)
+    if not name:
+        raise ValueError("Name is required")
+    phone, city = clean(phone), clean(city)
+    slug = db.slugify(name)
+
+    existing = db.q1("SELECT id FROM parties WHERE slug=?", (slug,))
+    if existing and (party_id is None or int(existing["id"]) != int(party_id)):
+        if party_id is None:
+            party_id = int(existing["id"])       # same name: edit them instead
+        else:
+            raise ValueError("Another party is already called %s" % name)
+
+    if party_id:
+        conn.execute(
+            "UPDATE parties SET name=?, slug=?, phone=?, city=?, is_supplier=?, is_customer=? "
+            "WHERE id=?",
+            (name, slug, phone or None, city or None,
+             1 if is_supplier else 0, 1 if is_customer else 0, int(party_id)))
+        db.log(conn, "party", int(party_id), "update", "Updated %s" % name,
+               {"name": name, "phone": phone, "city": city})
+        return int(party_id)
+
+    new_id = conn.insert(
+        "INSERT INTO parties(name,slug,is_supplier,is_customer,is_transporter,city,phone,notes,created_at)"
+        " VALUES (?,?,?,?,0,?,?,NULL,?)",
+        (name, slug, 1 if is_supplier else 0, 1 if is_customer else 0,
+         city or None, phone or None, db.now()))
+    db.log(conn, "party", new_id, "create", "Added %s" % name,
+           {"name": name, "phone": phone, "city": city})
+    return new_id
+
+
+def remove_party(conn, party_id: int) -> None:
+    n = db.scalar("SELECT COUNT(*) FROM deals WHERE party_id=? AND status != 'cancelled'",
+                  (int(party_id),))
+    if n:
+        raise ValueError("Cannot remove - %d deal%s already use this party" % (n, "" if n == 1 else "s"))
+    row = db.q1("SELECT name FROM parties WHERE id=?", (int(party_id),))
+    conn.execute("DELETE FROM parties WHERE id=?", (int(party_id),))
+    db.log(conn, "party", int(party_id), "remove",
+           "Removed %s" % (row["name"] if row else party_id), {})
+
+
 def search_parties(term: str = "", role: Optional[str] = None, limit: int = 8) -> List[Dict[str, Any]]:
     """Ranked chips: recent + frequent first, then name match."""
     where, args = [], []

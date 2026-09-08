@@ -334,6 +334,12 @@ main{overflow:auto;padding:26px 24px 60px}
 .seg button{flex:1;padding:13px;border-radius:11px;background:var(--bg);border:1px solid var(--line);font-size:15px}
 .seg button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:620}
 
+.party-list{display:flex;flex-direction:column;gap:9px;margin-bottom:8px}
+.party-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:13px 15px;
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
+.party-row .ghost-input{padding:11px 13px;font-size:15px}
+.party-row .chip{padding:10px 14px;font-size:14px}
+
 .setup-link{display:block;margin-top:14px;font-size:14px;color:var(--accent);text-decoration:underline}
 .setup-add{display:flex;gap:12px;align-items:center;margin-bottom:20px}
 .setup-add .ghost-input,.setup-inline .ghost-input{font-family:var(--sans);font-size:16px}

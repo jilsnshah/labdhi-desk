@@ -13,7 +13,7 @@
 //
 // Desktop is untouched; app.js picks between the two.
 
-import { h, mount, toast } from './ui.js';
+import { h, mount, svg, toast } from './ui.js';
 import * as f from './fmt.js';
 import { api } from './api.js';
 
@@ -723,6 +723,94 @@ function celebrate(sell, deal) {
   setTimeout(() => el.remove(), 1100);
 }
 
+// ============================================================= visualisation
+// The desktop sankey could not survive a 390px screen sideways, but the thing
+// it actually communicated - proportion - can. Two pieces do that job here:
+//
+//   1. a stacked strip on every card, so the split is visible while scanning
+//   2. a converging fan you can open on one trade, drawn top-to-bottom so it
+//      grows the way a phone scrolls instead of the way it cannot
+//
+// Colour carries the same meanings as the desktop graph: cheap stock green
+// through to dear amber, and ribbons green or red by the margin they earned.
+
+// Cost is shaded along one hue, light for cheap through to dark for dear.
+// The desktop green-to-amber scale cannot be reused here: red and green mean
+// loss and profit everywhere else in the app, and two perfectly profitable
+// lots eighty paise apart should not read as one good and one bad.
+function costShade(rate, low, high) {
+  if (!isFinite(low) || !isFinite(high) || high === low) return 'hsl(199 42% 46%)';
+  const t = Math.max(0, Math.min(1, (rate - low) / (high - low)));
+  return `hsl(${202 - t * 10} ${38 + t * 16}% ${62 - t * 28}%)`;
+}
+
+function proportionBar(parts, opts = {}) {
+  const total = parts.reduce((s, p) => s + p.qty, 0) || 1;
+  return h('div', { class: 'mbar' + (opts.thin ? ' thin' : '') },
+    ...parts.map(p => h('i', {
+      style: { width: (p.qty / total * 100) + '%', background: p.color },
+      title: p.label
+    })));
+}
+
+// One trade, its sources fanning into it. Sized to whatever width it is given,
+// so it can never be the thing that makes a page scroll sideways.
+function fanDiagram(sources, target, opts = {}) {
+  const W = 340, H = 186, BAND = 30, TOP = 10, BOT = H - BAND - 26;
+  const total = sources.reduce((s, x) => s + x.qty, 0) || 1;
+  const targetQty = Math.max(total, target.qty || 0);
+  const gap = sources.length > 1 ? 5 : 0;
+  const usable = W - gap * (sources.length - 1);
+
+  let x = 0, tx = 0;
+  const bands = [], ribbons = [], labels = [];
+
+  for (const src of sources) {
+    const w = Math.max(9, (src.qty / total) * usable);
+    const tw = (src.qty / targetQty) * W;
+    bands.push(svg('rect', {
+      x, y: TOP, width: w, height: BAND, rx: 6, fill: src.color, 'fill-opacity': .95
+    }));
+    // ribbon from this source down to its slice of the trade
+    const x0 = x, x1 = x + w, t0 = tx, t1 = tx + tw, my = (TOP + BAND + BOT) / 2;
+    ribbons.push(svg('path', {
+      d: `M${x0},${TOP + BAND} C${x0},${my} ${t0},${my} ${t0},${BOT}
+          L${t1},${BOT} C${t1},${my} ${x1},${my} ${x1},${TOP + BAND} Z`,
+      fill: src.good === false ? 'var(--down)' : 'var(--up)', 'fill-opacity': .22
+    }));
+    if (w > 46) {
+      labels.push(svg('text', {
+        x: x + w / 2, y: TOP + BAND / 2 + 4, 'text-anchor': 'middle',
+        'font-size': 11, 'font-weight': 700, fill: '#fff'
+      }, src.short));
+    }
+    x += w + gap; tx += tw;
+  }
+
+  const shortfall = targetQty > total ? ((targetQty - total) / targetQty) * W : 0;
+  return h('div', { class: 'mfan' },
+    svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'mfan-svg' },
+      ...ribbons, ...bands, ...labels,
+      svg('rect', {
+        x: 0, y: BOT, width: W - shortfall, height: BAND, rx: 6,
+        fill: opts.targetColor || 'var(--ink)', 'fill-opacity': .88
+      }),
+      shortfall ? svg('rect', {
+        x: W - shortfall, y: BOT, width: shortfall, height: BAND, rx: 6,
+        fill: 'var(--down)', 'fill-opacity': .35
+      }) : null,
+      svg('text', {
+        x: W / 2, y: BOT + BAND / 2 + 4, 'text-anchor': 'middle',
+        'font-size': 11.5, 'font-weight': 700, fill: '#fff'
+      }, target.short)),
+    h('div', { class: 'mfan-key' },
+      ...sources.map(src => h('span', {},
+        h('i', { style: { background: src.color } }), src.label)),
+      sources.length > 1
+        ? h('span', { class: 'mfan-note' }, 'lighter = cheaper stock')
+        : null));
+}
+
 // ===================================================================== flow
 // The lineage, told downwards. Each sale carries the lots it came from; each
 // purchase still holding stock says where the rest of it went. Same data as the
@@ -784,7 +872,14 @@ export async function renderMobileFlow(root, appCtx) {
       ...sales.map(sale => {
         const sources = bySale.get(sale.id) || [];
         const margin = sources.reduce((s, e) => s + e.margin_paise, 0);
-        return h('div', { class: 'mflow-card' },
+        const costs = sources.map(e => e.cost_paise);
+        const low = Math.min(...costs), high = Math.max(...costs);
+        const parts = sources.map(e => ({
+          qty: e.qty_g, color: costShade(e.cost_paise, low, high),
+          label: (lots.get(e.source) || {}).party || ''
+        }));
+        if (sale.uncovered_g) parts.push({ qty: sale.uncovered_g, color: 'var(--down)', label: 'uncovered' });
+        const card = h('div', { class: 'mflow-card' },
           h('div', { class: 'mflow-head' },
             h('span', { class: 'mflow-side sell' }, 'SOLD'),
             h('div', { class: 'grow' },
@@ -811,6 +906,29 @@ export async function renderMobileFlow(root, appCtx) {
                   h('span', { class: 'who' }, 'uncovered'))
               : null,
             sources.length ? null : h('div', { class: 'mflow-empty' }, 'No stock allocated.')));
+
+        // The strip is always visible; the fan opens on demand so a long list
+        // stays scannable.
+        if (parts.length) {
+          if (parts.length > 1) card.insertBefore(proportionBar(parts), card.querySelector('.mflow-links'));
+          card.onclick = () => {
+            const open = card.querySelector('.mfan');
+            if (open) { open.remove(); return; }
+            card.appendChild(fanDiagram(
+              sources.map(e => {
+                const lot = lots.get(e.source) || {};
+                return {
+                  qty: e.qty_g, color: costShade(e.cost_paise, low, high),
+                  good: e.margin_paise >= 0,
+                  short: f.qty(e.qty_g, { short: true }),
+                  label: `${lot.party || '—'} @ ${f.rate(e.cost_paise)}`
+                };
+              }),
+              { qty: sale.qty_g, short: `${sale.party} · ${f.qty(sale.qty_g)} @ ${f.rate(sale.rate_paise)}` },
+              { targetColor: 'var(--up)' }));
+          };
+        }
+        return card;
       }),
       sales.length ? null : h('div', { class: 'empty' },
         h('h3', {}, 'No sales in this window'), h('div', {}, 'Try a longer range.'))),
@@ -819,6 +937,10 @@ export async function renderMobileFlow(root, appCtx) {
       h('div', { class: 'mlabel', style: { padding: '0 14px' } }, 'Still in stock'),
       h('div', { class: 'mflow' }, ...idle.slice(0, 20).map(lot => {
         const gone = byLot.get(lot.id) || [];
+        const gonePart = gone.map(e => ({
+          qty: e.qty_g, color: e.margin_paise >= 0 ? 'var(--up)' : 'var(--down)', label: 'sold'
+        }));
+        gonePart.push({ qty: lot.remaining_g, color: 'var(--line-2)', label: 'in stock' });
         return h('div', { class: 'mflow-card' },
           h('div', { class: 'mflow-head' },
             h('span', { class: 'mflow-side lot' }, 'HELD'),
@@ -828,6 +950,7 @@ export async function renderMobileFlow(root, appCtx) {
             h('div', { class: 'mflow-money' },
               h('b', { class: 'num' }, f.qty(lot.remaining_g)),
               h('span', { class: 'num' }, `of ${f.qty(lot.qty_g)} @ ${f.rate(lot.rate_paise)}`))),
+          gonePart.length > 1 ? proportionBar(gonePart, { thin: true }) : null,
           gone.length
             ? h('div', { class: 'mflow-links' }, ...gone.map(e => h('div', { class: 'mflow-link' },
                 h('i', { style: { background: 'var(--line-2)' } }),
@@ -883,6 +1006,21 @@ export async function renderMobileTape(root, appCtx) {
       if (card.dataset.open) { card.querySelector('.mflow-links').remove(); delete card.dataset.open; return; }
       const full = await api.deal(d.id);
       const lines = sell ? full.allocations : full.sold;
+      const costs = lines.map(a => a.cost_paise);
+      const lo = Math.min(...costs), hi = Math.max(...costs);
+      if (lines.length) {
+        card.appendChild(fanDiagram(
+          lines.map(a => ({
+            qty: a.qty_g,
+            color: sell ? costShade(a.cost_paise, lo, hi) : 'hsl(214 60% 55%)',
+            good: a.margin_paise >= 0,
+            short: f.qty(a.qty_g, { short: true }),
+            label: sell ? `${a.supplier_name} @ ${f.rate(a.cost_paise)}`
+                        : `${a.customer_name} @ ${f.rate(a.sale_rate_paise)}`
+          })),
+          { qty: full.qty_g, short: `${full.party_name} · ${f.qty(full.qty_g)}` },
+          { targetColor: sell ? 'var(--up)' : 'var(--accent)' }));
+      }
       card.appendChild(h('div', { class: 'mflow-links' },
         ...lines.map(a => h('div', { class: 'mflow-link' },
           h('i', { style: { background: a.margin_paise >= 0 ? 'var(--up)' : 'var(--down)' } }),
@@ -975,10 +1113,53 @@ function heroStat(label, value, tone) {
   return h('div', {}, h('span', {}, label), h('b', { class: 'num ' + (tone || '') }, value));
 }
 
+// A proper sheet. Three fields deserve better than three browser prompts.
+function sheet(title, fields, onSave) {
+  const inputs = {};
+  const body = fields.map(fl => {
+    if (fl.type === 'toggle') {
+      const btn = h('button', {
+        class: 'msheet-toggle' + (fl.value ? ' on' : ''),
+        onclick: () => { btn.classList.toggle('on'); }
+      }, fl.label);
+      inputs[fl.key] = () => btn.classList.contains('on');
+      return btn;
+    }
+    const input = h('input', {
+      type: fl.type || 'text', value: fl.value || '', placeholder: fl.placeholder || '',
+      inputmode: fl.type === 'tel' ? 'tel' : undefined
+    });
+    inputs[fl.key] = () => input.value.trim();
+    return h('label', { class: 'msheet-field' }, h('span', {}, fl.label), input);
+  });
+
+  const toggles = body.filter(el => el.classList && el.classList.contains('msheet-toggle'));
+  const rest = body.filter(el => !toggles.includes(el));
+  const overlay = h('div', { class: 'msheet' },
+    h('div', { class: 'msheet-card' },
+      h('div', { class: 'msheet-title' }, title),
+      ...rest,
+      toggles.length ? h('div', { class: 'msheet-toggles' }, ...toggles) : null,
+      h('div', { class: 'msheet-foot' },
+        h('button', { class: 'mt-skip', onclick: () => overlay.remove() }, 'Cancel'),
+        h('button', {
+          class: 'mt-next',
+          onclick: async () => {
+            const values = {};
+            for (const [k, get] of Object.entries(inputs)) values[k] = get();
+            try { await onSave(values); overlay.remove(); }
+            catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
+          }
+        }, 'Save'))));
+  document.body.appendChild(overlay);
+  const first = overlay.querySelector('input');
+  if (first) setTimeout(() => first.focus(), 60);
+}
+
 // ==================================================================== setup
 export async function renderMobileSetup(root, appCtx) {
   ctx = appCtx;
-  const { tree } = await api.catalogTree();
+  const [{ tree }, { parties }] = await Promise.all([api.catalogTree(), api.partyList()]);
   const open = ctx.setupOpen || (ctx.setupOpen = {});
 
   const add = async (body, what) => {
@@ -995,8 +1176,48 @@ export async function renderMobileSetup(root, appCtx) {
     if (v && v.trim()) run(v.trim());
   };
 
+  const editParty = (p) => sheet(p ? 'Edit party' : 'Add buyer or seller', [
+    { key: 'name', label: 'Name', value: p ? p.name : '', placeholder: 'Krishna Dehgam' },
+    { key: 'phone', label: 'Phone', type: 'tel', value: p ? (p.phone || '') : '',
+      placeholder: '+91 98250 00000' },
+    { key: 'city', label: 'Location', value: p ? (p.city || '') : '', placeholder: 'Ahmedabad' },
+    { key: 'is_customer', label: 'Buys from me', type: 'toggle', value: p ? !!p.is_customer : true },
+    { key: 'is_supplier', label: 'Sells to me', type: 'toggle', value: p ? !!p.is_supplier : false }
+  ], async values => {
+    if (!values.name) throw new Error('Name is required');
+    await api.partySave({ ...values, id: p ? p.id : undefined });
+    toast(p ? 'Saved' : `Added ${values.name}`);
+    renderMobileSetup(root, ctx);
+  });
+
+  const dropParty = async (p) => {
+    if (!window.confirm(`Remove ${p.name}?`)) return;
+    try { await api.partyRemove(p.id); toast(`Removed ${p.name}`); renderMobileSetup(root, ctx); }
+    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
+  };
+
   mount(root, h('div', { class: 'view' },
-    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
+    h('div', { class: 'mlabel', style: { padding: '14px 14px 10px' } },
+      'Buyers & sellers', h('span', {}, `${parties.length}`)),
+    h('div', { class: 'mflow' },
+      h('button', { class: 'mmore', style: { marginBottom: '10px' }, onclick: () => editParty(null) },
+        '+ Add buyer or seller'),
+      ...parties.map(p => h('div', { class: 'mflow-card' },
+        h('div', { class: 'mflow-head' },
+          h('div', { class: 'grow', onclick: () => editParty(p) },
+            h('b', {}, p.name),
+            h('span', {}, [p.phone, p.city].filter(Boolean).join(' · ') || 'no contact details')),
+          h('div', { class: 'mflow-money' },
+            h('b', { class: 'num' }, p.deal_count ? `${p.deal_count}` : '—'),
+            h('span', {}, p.deal_count ? 'deals' : 'unused')),
+          h('button', { class: 'msetup-x', onclick: () => dropParty(p) }, '×')),
+        h('div', { class: 'mparty-tags' },
+          p.is_customer ? h('span', { class: 'tag up' }, 'Buyer') : null,
+          p.is_supplier ? h('span', { class: 'tag' }, 'Seller') : null,
+          !p.is_customer && !p.is_supplier ? h('span', { class: 'tag' }, 'No role set') : null)))),
+
+    h('div', { class: 'mlabel', style: { padding: '18px 14px 10px' } }, 'Materials'),
+    h('div', { class: 'mflow', style: { paddingTop: '0' } },
       h('div', { class: 'mt-hint', style: { marginBottom: '10px' } },
         'Manufacturer means who made the resin, not who you trade with.'),
       h('button', {

@@ -251,6 +251,36 @@ def catalog_options(level: str, material: Optional[str] = None,
     }
 
 
+class PartyIn(BaseModel):
+    id: Optional[int] = None
+    name: str
+    phone: Optional[str] = ""
+    city: Optional[str] = ""
+    is_supplier: bool = False
+    is_customer: bool = False
+
+
+@app.get("/api/parties")
+def list_parties(q: str = ""):
+    return {"parties": catalog.list_parties(q)}
+
+
+@app.post("/api/parties")
+def save_party(body: PartyIn):
+    with db.tx() as conn:
+        pid = catalog.save_party(
+            conn, name=body.name, phone=body.phone or "", city=body.city or "",
+            is_supplier=body.is_supplier, is_customer=body.is_customer, party_id=body.id)
+    return {"id": pid, "parties": catalog.list_parties()}
+
+
+@app.post("/api/parties/{party_id}/remove")
+def remove_party(party_id: int):
+    with db.tx() as conn:
+        catalog.remove_party(conn, party_id)
+    return {"parties": catalog.list_parties()}
+
+
 @app.get("/api/catalog/tree")
 def catalog_tree():
     """The whole master tree, for the Setup screen."""
