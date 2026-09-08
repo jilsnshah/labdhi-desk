@@ -12,6 +12,13 @@ export function makeFilters({ fields, onChange }) {
   for (const fld of fields) state[fld.key] = fld.value || '';
 
   const el = h('div', { class: 'filterbar' });
+  // On a phone the controls start folded: you open a list to see the list, not
+  // to see seven dropdowns. The button carries a count so an active filter is
+  // never hidden from you.
+  const toggle = h('button', {
+    class: 'filt-toggle',
+    onclick: () => { el.classList.toggle('open'); paint(); }
+  }, '');
 
   function set(key, value) {
     state[key] = value || '';
@@ -65,7 +72,11 @@ export function makeFilters({ fields, onChange }) {
 
   function paint() {
     const chosen = fields.filter(f => state[f.key] && f.type !== 'chips');
+    const n = Object.keys(active()).length;
+    toggle.textContent = n ? `Filters · ${n}` : 'Filters';
+    toggle.classList.toggle('has', n > 0);
     mount(el,
+      toggle,
       h('div', { class: 'filt-row' }, ...fields.map(control)),
       chosen.length
         ? h('div', { class: 'filt-active' },

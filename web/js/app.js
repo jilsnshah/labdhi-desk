@@ -7,6 +7,13 @@ import { renderFlow } from './flow.js';
 import { renderTape, renderPosition } from './tape.js';
 import { startTrade, renderTrade } from './trade.js';
 import { renderSetup } from './setup.js';
+import { mountShell, renderMobileDesk, startTicket, syncTabs, paintHeader } from './mobile.js';
+
+// A phone is a different product, not a narrower window: it gets its own shell
+// and its own buy/sell flow. The breakpoint is watched rather than read once,
+// so rotating a tablet swaps cleanly instead of stranding a half-built screen.
+const phone = window.matchMedia('(max-width: 760px)');
+const isPhone = () => phone.matches;
 
 const ctx = {
   boot: null, desk: null, route: 'desk', param: null, skuFilter: null,
@@ -16,17 +23,28 @@ const ctx = {
 const main = $('#main'), tickerEl = $('#ticker');
 
 async function boot() {
+  document.body.classList.toggle('phone', isPhone());
+  if (isPhone()) mountShell(ctx);
   ctx.boot = await api.bootstrap();
   ctx.desk = ctx.boot.desk;
   $('#company').textContent = ctx.boot.settings.company_name || 'Trading Desk';
   renderTicker(tickerEl, ctx.desk);
+  if (isPhone()) paintHeader(ctx.desk);
   paint();
 }
+
+phone.addEventListener('change', () => {
+  document.body.classList.toggle('phone', isPhone());
+  if (isPhone() && !document.querySelector('.mhead')) mountShell(ctx);
+  if (isPhone() && ctx.desk) paintHeader(ctx.desk);
+  paint();
+});
 
 async function refresh() {
   ctx.boot = await api.bootstrap();
   ctx.desk = ctx.boot.desk;
   renderTicker(tickerEl, ctx.desk);
+  if (isPhone()) paintHeader(ctx.desk);
   if (ctx.route !== 'trade') paint();
 }
 
@@ -36,12 +54,16 @@ function go(route, param = null) {
   // so the trade screen owns it alone.
   document.body.classList.toggle('trading', route === 'trade');
   for (const b of document.querySelectorAll('.nav button')) b.classList.toggle('on', b.dataset.route === route);
+  if (isPhone()) syncTabs();
   main.scrollTop = 0;
   paint();
 }
 
 function paint() {
-  if (ctx.route === 'desk') renderDesk(main, ctx.desk, ctx);
+  if (ctx.route === 'desk') {
+    if (isPhone()) renderMobileDesk(main, ctx.desk);
+    else renderDesk(main, ctx.desk, ctx);
+  }
   else if (ctx.route === 'flow') renderFlow(main, ctx);
   else if (ctx.route === 'tape') renderTape(main, ctx);
   else if (ctx.route === 'position') renderPosition(main, ctx.param, ctx);
@@ -50,6 +72,10 @@ function paint() {
 }
 
 function trade(side, opts = {}) {
+  if (isPhone()) {
+    startTicket(side, opts.sku ? { sku_id: opts.sku.id, material: opts.sku.display } : {});
+    return;
+  }
   startTrade(side, opts, ctx);
   go('trade');
 }
@@ -65,6 +91,8 @@ async function openDeal(dealId) {
 function sell(pos) {
   trade('sell', { sku: { id: pos.sku_id, display: pos.material } });
 }
+
+ctx.trade = trade;
 
 // ---------------------------------------------------------------- keyboard
 window.addEventListener('keydown', e => {

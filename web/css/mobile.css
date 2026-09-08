@@ -1,0 +1,246 @@
+/* Labdhi Desk — phone.
+   Not the desktop at a narrower width. A trader is on a call, one hand on the
+   phone, and needs the deal recorded before the conversation moves on. So:
+   one decision per screen, targets you can hit without looking, a numeric pad
+   that never lets the OS keyboard cover the page, and the two actions that
+   matter parked under the thumb. */
+
+body.phone .topbar { display: none; }
+body.phone #app { grid-template-rows: auto 1fr; }
+body.phone main { padding: 0 0 var(--dock-h) 0; }
+body.phone .view { max-width: 100%; }
+
+:root { --dock-h: 148px; --tap: 56px; }
+body.phone.trading { --dock-h: 0px; }
+
+/* ---------------------------------------------------------------- header */
+.mhead {
+  position: sticky; top: 0; z-index: 30; background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  padding: calc(10px + env(safe-area-inset-top, 0px)) 16px 10px;
+}
+.mhead-top { display: flex; align-items: center; gap: 12px; }
+.mhead-name { font-size: 17px; font-weight: 680; letter-spacing: -.01em; }
+.mhead-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--up); flex: 0 0 8px; }
+.mhead-stat { margin-left: auto; text-align: right; }
+.mhead-stat b { display: block; font-size: 17px; font-weight: 700; line-height: 1.1; }
+.mhead-stat span { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+.mhead-strip { display: flex; gap: 18px; margin-top: 8px; overflow-x: auto; scrollbar-width: none; }
+.mhead-strip::-webkit-scrollbar { display: none; }
+.mhead-strip div { white-space: nowrap; font-size: 13px; color: var(--ink-2); }
+.mhead-strip b { color: var(--ink); font-weight: 640; }
+
+/* ---------------------------------------------------------------- dock */
+/* Buy and Sell live above the tabs, full width, thumb height. They are the
+   whole point of the app and never more than one tap away. */
+.dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+        background: var(--surface); border-top: 1px solid var(--line);
+        padding-bottom: env(safe-area-inset-bottom, 0px); }
+body.phone.trading .dock { display: none; }
+.dock-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 10px 12px 6px; }
+.dock-btn { height: var(--tap); border-radius: 15px; font-size: 19px; font-weight: 750;
+            letter-spacing: .02em; color: #fff; display: flex; align-items: center;
+            justify-content: center; gap: 9px; }
+.dock-btn.buy { background: var(--accent); }
+.dock-btn.sell { background: var(--up); }
+.dock-btn:active { transform: scale(.97); filter: brightness(.94); }
+.dock-tabs { display: grid; grid-template-columns: repeat(4, 1fr); padding: 0 6px 6px; }
+.dock-tab { padding: 8px 2px 6px; border-radius: 10px; font-size: 11px; font-weight: 600;
+            color: var(--ink-3); display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.dock-tab i { font-size: 17px; font-style: normal; line-height: 1; }
+.dock-tab.on { color: var(--accent); }
+
+/* ---------------------------------------------------------------- desk */
+.mdesk { padding: 14px 14px 6px; }
+.mstat-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+.mstat { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 13px 14px; }
+.mstat span { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+.mstat b { display: block; font-size: 21px; font-weight: 700; margin-top: 4px; letter-spacing: -.02em; }
+
+.mlabel { font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+          color: var(--ink-3); margin: 20px 0 10px; display: flex; align-items: center; gap: 10px; }
+.mlabel span { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 500;
+               font-size: 13px; color: var(--ink-3); }
+
+/* One position per row: what it is, how much, what it cost, and a sell button
+   big enough to hit while walking. */
+.mpos { display: flex; align-items: center; gap: 12px; padding: 14px;
+        background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+        margin-bottom: 9px; }
+.mpos-main { flex: 1; min-width: 0; }
+.mpos-name { font-size: 15.5px; font-weight: 650; white-space: nowrap; overflow: hidden;
+             text-overflow: ellipsis; }
+.mpos-sub { font-size: 12.5px; color: var(--ink-3); margin-top: 3px; font-family: var(--mono); }
+.mpos-qty { text-align: right; }
+.mpos-qty b { display: block; font-size: 19px; font-weight: 700; letter-spacing: -.01em; }
+.mpos-qty span { font-size: 12px; }
+.mpos-go { width: 46px; height: 46px; flex: 0 0 46px; border-radius: 13px; background: var(--up-soft);
+           color: var(--up); font-size: 22px; font-weight: 700; display: grid; place-items: center; }
+.mpos-go:active { background: var(--up); color: #fff; }
+
+/* Repeat a deal you have already done: the fastest path there is. */
+.mrepeat { display: flex; gap: 9px; overflow-x: auto; padding: 2px 14px 4px; scrollbar-width: none; }
+.mrepeat::-webkit-scrollbar { display: none; }
+.mrep { flex: 0 0 auto; background: var(--surface); border: 1px solid var(--line);
+        border-radius: 14px; padding: 11px 14px; text-align: left; min-width: 168px; }
+.mrep i { font-style: normal; font-size: 10.5px; font-weight: 700; letter-spacing: .08em;
+          text-transform: uppercase; }
+.mrep.buy i { color: var(--accent); }
+.mrep.sell i { color: var(--up); }
+.mrep b { display: block; font-size: 14.5px; font-weight: 640; margin-top: 3px;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+.mrep span { display: block; font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+
+/* ---------------------------------------------------------------- ticket */
+.mtrade { position: fixed; inset: 0; z-index: 60; background: var(--bg);
+          display: flex; flex-direction: column; }
+.mt-head { display: flex; align-items: center; gap: 12px; padding: calc(8px + env(safe-area-inset-top,0px)) 12px 10px;
+           background: var(--surface); border-bottom: 1px solid var(--line); }
+.mt-back { width: 44px; height: 44px; flex: 0 0 44px; border-radius: 12px; font-size: 24px;
+           display: grid; place-items: center; color: var(--ink-2); }
+.mt-back:active { background: var(--bg); }
+.mt-title { flex: 1; min-width: 0; }
+.mt-title b { display: block; font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
+.mt-title span { display: block; font-size: 12.5px; color: var(--ink-3); white-space: nowrap;
+                 overflow: hidden; text-overflow: ellipsis; }
+.mtrade.sell .mt-kind { color: var(--up); }
+.mtrade.buy .mt-kind { color: var(--accent); }
+.mt-steps { display: flex; gap: 5px; padding: 0 14px 10px; background: var(--surface);
+            border-bottom: 1px solid var(--line); }
+.mt-steps i { height: 3px; flex: 1; border-radius: 2px; background: var(--line); }
+.mt-steps i.done { background: var(--accent); }
+.mtrade.sell .mt-steps i.done { background: var(--up); }
+
+.mt-body { flex: 1; overflow-y: auto; padding: 16px 14px 20px;
+            display: flex; flex-direction: column; }
+/* The pad hugs the bottom of the screen: keys at the top of a tall phone
+   cannot be reached with the hand that is holding it. */
+.mt-body .mpad { margin-top: auto; padding-top: 14px; }
+.mt-q { font-size: 22px; font-weight: 720; letter-spacing: -.02em; margin-bottom: 4px; }
+.mt-hint { font-size: 13.5px; color: var(--ink-3); margin-bottom: 16px; }
+
+/* Choice rows: full width, 60px tall, one tap and the flow moves on. */
+.mopt { display: flex; align-items: center; gap: 13px; width: 100%; padding: 15px 16px;
+        background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+        margin-bottom: 9px; text-align: left; }
+.mopt:active { border-color: var(--accent); background: var(--accent-soft); }
+.mopt.on { border-color: var(--accent); border-width: 2px; background: var(--accent-soft); }
+.mopt-main { flex: 1; min-width: 0; }
+.mopt-main b { display: block; font-size: 16.5px; font-weight: 640; white-space: nowrap;
+               overflow: hidden; text-overflow: ellipsis; }
+.mopt-main span { display: block; font-size: 12.5px; color: var(--ink-3); margin-top: 3px;
+                  font-family: var(--mono); }
+.mopt-tag { font-size: 13px; font-weight: 650; color: var(--ink-2); white-space: nowrap; }
+.mopt-tag.up { color: var(--up); }
+.mopt.ghost { border-style: dashed; color: var(--ink-2); justify-content: center; font-weight: 600; }
+
+.msearch { display: flex; align-items: center; gap: 10px; background: var(--surface);
+           border: 1px solid var(--line); border-radius: 14px; padding: 13px 15px; margin-bottom: 14px; }
+.msearch input { flex: 1; border: 0; background: none; outline: none; font-size: 16px; min-width: 0; }
+
+/* ---------------------------------------------------------------- numpad */
+/* The OS keyboard covers half a phone and needs precision. This does not. */
+.mnum-value { text-align: center; padding: 18px 0 6px; }
+.mnum-value b { display: block; font-size: 52px; font-weight: 750; letter-spacing: -.035em;
+                line-height: 1; font-family: var(--mono); }
+.mnum-value small { display: block; font-size: 14px; color: var(--ink-3); margin-top: 7px; }
+.mnum-value.warn b { color: var(--down); }
+
+.mchips { display: flex; gap: 8px; overflow-x: auto; padding: 12px 0 14px; scrollbar-width: none; }
+.mchips::-webkit-scrollbar { display: none; }
+.mchip { flex: 0 0 auto; padding: 12px 18px; border-radius: 13px; background: var(--surface);
+         border: 1px solid var(--line); font-size: 15.5px; font-weight: 620; }
+.mchip:active { border-color: var(--accent); color: var(--accent); }
+.mchip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.mpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.mkey { height: 62px; border-radius: 15px; background: var(--surface); border: 1px solid var(--line);
+        font-size: 26px; font-weight: 620; font-family: var(--mono); display: grid; place-items: center; }
+.mkey:active { background: var(--accent-soft); border-color: var(--accent); }
+.mkey.wide { grid-column: span 2; }
+.mkey.fn { font-size: 20px; color: var(--ink-2); font-family: var(--sans); }
+
+/* margin readout that moves while the rate moves */
+.mlive { border-radius: 16px; padding: 15px 17px; margin-bottom: 14px;
+         background: var(--surface); border: 1px solid var(--line); }
+.mlive.good { background: var(--up-soft); border-color: #b9e0cb; }
+.mlive.bad { background: var(--down-soft); border-color: #f3c9c9; }
+.mlive-top { display: flex; align-items: baseline; gap: 10px; }
+.mlive-top b { font-size: 27px; font-weight: 750; letter-spacing: -.02em; }
+.mlive-top span { font-size: 14px; font-weight: 620; }
+.mlive-sub { font-size: 13px; color: var(--ink-2); margin-top: 5px; }
+
+/* ---------------------------------------------------------------- split */
+.mlot { display: flex; align-items: center; gap: 12px; width: 100%; padding: 14px;
+        background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+        margin-bottom: 9px; text-align: left; }
+.mlot.on { border-color: var(--accent); border-width: 2px; background: var(--accent-soft); }
+.mlot-rate { font-size: 20px; font-weight: 720; letter-spacing: -.02em; min-width: 76px; }
+.mlot-main { flex: 1; min-width: 0; }
+.mlot-main b { display: block; font-size: 14.5px; font-weight: 620; white-space: nowrap;
+               overflow: hidden; text-overflow: ellipsis; }
+.mlot-main span { display: block; font-size: 12px; color: var(--ink-3); font-family: var(--mono); margin-top: 2px; }
+.mlot-take { text-align: right; min-width: 74px; }
+.mlot-take b { display: block; font-size: 17px; font-weight: 700; }
+.mlot-take span { font-size: 11px; color: var(--ink-3); }
+
+.massign { position: sticky; top: -16px; z-index: 2; display: flex; align-items: center; gap: 12px;
+           padding: 14px 16px; border-radius: 15px; margin-bottom: 14px;
+           background: var(--sell-soft, #fff6e6); border: 1px solid #f0d9ae; }
+.massign.done { background: var(--up-soft); border-color: #b9e0cb; }
+.massign b { font-size: 22px; font-weight: 740; letter-spacing: -.02em; }
+.massign span { font-size: 12.5px; color: var(--ink-2); }
+.massign .grow { flex: 1; }
+.massign-act { padding: 11px 15px; border-radius: 12px; background: var(--surface);
+               border: 1px solid var(--line); font-size: 14px; font-weight: 640; }
+
+/* ---------------------------------------------------------------- footer */
+.mt-foot { padding: 12px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+           background: var(--surface); border-top: 1px solid var(--line); display: flex; gap: 10px; }
+.mt-next { flex: 1; height: var(--tap); border-radius: 15px; font-size: 18px; font-weight: 720;
+           color: #fff; background: var(--accent); display: grid; place-items: center; }
+.mtrade.sell .mt-next { background: var(--up); }
+.mtrade .mt-next:disabled { background: var(--line); color: var(--ink-3); }
+.mt-next:active:not(:disabled) { filter: brightness(.94); }
+.mt-skip { padding: 0 18px; height: var(--tap); border-radius: 15px; border: 1px solid var(--line);
+           background: var(--surface); font-size: 15px; font-weight: 620; color: var(--ink-2); }
+
+/* review */
+.mrev { background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
+        padding: 4px 16px; margin-bottom: 14px; }
+.mrev-row { display: flex; align-items: center; gap: 12px; padding: 14px 0;
+            border-bottom: 1px solid var(--line); }
+.mrev-row:last-child { border-bottom: 0; }
+.mrev-row span { font-size: 12.5px; letter-spacing: .06em; text-transform: uppercase;
+                 color: var(--ink-3); min-width: 92px; }
+.mrev-row b { font-size: 16.5px; font-weight: 640; flex: 1; text-align: right; }
+.mrev-row em { font-style: normal; font-size: 14px; color: var(--accent); font-weight: 620; }
+
+.mdone { position: fixed; inset: 0; z-index: 90; display: grid; place-content: center;
+         text-align: center; background: var(--bg); animation: mfade .2s ease both; }
+@keyframes mfade { from { opacity: 0 } to { opacity: 1 } }
+.mdone b { display: block; font-size: 46px; font-weight: 800; letter-spacing: -.03em; }
+.mdone span { display: block; font-size: 16px; color: var(--ink-2); margin-top: 8px; }
+
+
+/* ---------------------------------------------------------------- filters */
+body.phone .filt-toggle {
+  display: inline-flex; align-items: center; gap: 8px; padding: 12px 18px;
+  border-radius: 13px; background: var(--surface); border: 1px solid var(--line);
+  font-size: 15px; font-weight: 620; margin-bottom: 4px;
+}
+body.phone .filt-toggle::after { content: '▾'; font-size: 11px; color: var(--ink-3); }
+body.phone .filterbar.open .filt-toggle::after { content: '▴'; }
+body.phone .filt-toggle.has { border-color: var(--accent); color: var(--accent); }
+body.phone .filterbar .filt-row { display: none; }
+body.phone .filterbar.open .filt-row { display: flex; margin-top: 12px; }
+body.phone .filterbar .filt-active { margin-top: 10px; }
+
+/* the desktop views still render inside the phone shell; give them room */
+body.phone .section-head { padding: 0 14px; }
+body.phone .searchbar,
+body.phone .filterbar,
+body.phone .tape,
+body.phone .morebar,
+body.phone .flow-wrap,
+body.phone .range { margin-left: 14px; margin-right: 14px; }
