@@ -83,26 +83,14 @@ export function paintHeader(desk) {
 // ===================================================================== desk
 export function renderMobileDesk(root, desk) {
   paintHeader(desk);
-  const repeats = recentCombos(ctx.boot ? ctx.boot.tape : []);
-
   // No stat cards: the header strip above already carries stock, today's P&L
   // and book value, and a phone screen is better spent on what he can act on.
   mount(root, h('div', { class: 'view' },
     desk.attention && desk.attention.length
-      ? h('div', { class: 'mdesk' },
+      ? h('div', { class: 'mflow', style: { paddingTop: '14px' } },
           ...desk.attention.slice(0, 3).map(a => h('div', { class: 'alert ' + a.level },
             h('i', { class: 'bar' }),
             h('div', {}, h('b', {}, a.title), h('div', {}, h('span', {}, a.detail))))))
-      : null,
-
-    repeats.length
-      ? [h('div', { class: 'mlabel', style: { padding: '0 14px' } }, 'Do it again'),
-         h('div', { class: 'mrepeat' }, ...repeats.map(r => h('button', {
-           class: 'mrep ' + r.side, onclick: () => startTicket(r.side, r)
-         },
-           h('i', {}, r.side === 'buy' ? 'BUY' : 'SELL'),
-           h('b', {}, r.party_name),
-           h('span', {}, r.material))))]
       : null,
 
     h('div', { class: 'mdesk' },
@@ -123,24 +111,6 @@ export function renderMobileDesk(root, desk) {
         }, '↑'))),
       desk.positions.length ? null : h('div', { class: 'empty' },
         h('h3', {}, 'No stock yet'), h('div', {}, 'Tap Buy to record your first purchase.')))));
-}
-
-// The same party and grade come round again and again; offering the last few
-// as one tap removes two whole screens from the common case.
-function recentCombos(tape) {
-  const seen = new Set(), out = [];
-  for (const d of tape || []) {
-    if (d.status !== 'booked') continue;
-    const key = `${d.side}|${d.party_id}|${d.sku_id}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({
-      side: d.side, party_id: d.party_id, party_name: d.party_name,
-      sku_id: d.sku_id, material: d.material, rate_paise: d.rate_paise
-    });
-    if (out.length === 6) break;
-  }
-  return out;
 }
 
 // =================================================================== ticket
@@ -483,7 +453,7 @@ function stepQty() {
       h('small', {}, over
         ? `More than you hold — max ${f.qty(stock)}`
         : (live ? `${Math.round(live / 1000).toLocaleString('en-IN')} kg` : 'tap a shortcut or type'))),
-    h('div', { class: 'mchips' }, ...quick.map(([label, g]) => h('button', {
+    h('div', { class: 'mchips g4' }, ...quick.map(([label, g]) => h('button', {
       class: 'mchip' + (ms.qty_g === g && ms.entry === '' ? ' on' : ''),
       onclick: () => { ms.qty_g = g; ms.entry = ''; if (ms.side === 'sell') autoIfSingle(); next(); }
     }, label))),
@@ -526,7 +496,7 @@ function stepRate() {
       h('b', {}, '₹' + (ms.entry !== '' ? ms.entry : (live / 100).toFixed(2))),
       h('small', {}, 'per kg, basic rate')),
 
-    h('div', { class: 'mchips' },
+    h('div', { class: 'mchips g3' },
       ...[-100, -50, -25, 25, 50, 100].map(d => h('button', {
         class: 'mchip',
         onclick: () => {
@@ -597,9 +567,8 @@ function lotEditor() {
     h('div', { class: 'mnum-value' },
       h('b', {}, (ms.entry !== '' ? ms.entry : (live / MT || 0).toString()) + ' MT'),
       h('small', {}, `${Math.round(live / 1000).toLocaleString('en-IN')} kg`)),
-    h('div', { class: 'mchips' },
-      h('button', { class: 'mchip', onclick: () => set(room) },
-        `All the rest (${f.qty(room)})`),
+    h('div', { class: 'mchips g2' },
+      h('button', { class: 'mchip', onclick: () => set(room) }, `Rest · ${f.qty(room)}`),
       h('button', { class: 'mchip', onclick: () => set(0) }, 'None')),
     numpad(3, () => set(Math.round(parseFloat(ms.entry || '0') * MT)), 'Set')
   ];
@@ -752,4 +721,329 @@ function celebrate(sell, deal) {
   document.body.appendChild(el);
   if (navigator.vibrate) navigator.vibrate(18);
   setTimeout(() => el.remove(), 1100);
+}
+
+// ===================================================================== flow
+// The lineage, told downwards. Each sale carries the lots it came from; each
+// purchase still holding stock says where the rest of it went. Same data as the
+// sankey on desktop, none of the dragging.
+const RANGES = [['7d', 7], ['30d', 30], ['90d', 90], ['All', 0]];
+
+function shiftDays(days) {
+  const d = new Date(); d.setDate(d.getDate() - days);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+export async function renderMobileFlow(root, appCtx) {
+  ctx = appCtx;
+  if (ctx.flowDays === undefined) ctx.flowDays = 30;
+  const from = ctx.flowDays ? shiftDays(ctx.flowDays) : undefined;
+
+  const [graph, posPage] = await Promise.all([
+    api.graph({ sku_id: ctx.skuFilter || undefined, date_from: from, limit: 40 }),
+    api.positions({ limit: 60 })
+  ]);
+
+  const lots = new Map();
+  for (const n of graph.nodes) if (n.kind === 'lot') lots.set(n.id, n);
+  const sales = graph.nodes.filter(n => n.kind === 'sale').reverse();
+  const bySale = new Map(), byLot = new Map();
+  for (const e of graph.edges) {
+    if (!bySale.has(e.target)) bySale.set(e.target, []);
+    bySale.get(e.target).push(e);
+    if (!byLot.has(e.source)) byLot.set(e.source, []);
+    byLot.get(e.source).push(e);
+  }
+  const idle = graph.nodes
+    .filter(n => n.kind === 'lot' && n.remaining_g > 0)
+    .sort((a, b) => b.remaining_g - a.remaining_g);
+
+  mount(root, h('div', { class: 'view' },
+    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
+      h('div', { class: 'mchips g4', style: { padding: '0 0 12px' } },
+        ...RANGES.map(([label, days]) => h('button', {
+          class: 'mchip' + (ctx.flowDays === days ? ' on' : ''),
+          onclick: () => { ctx.flowDays = days; renderMobileFlow(root, ctx); }
+        }, label))),
+      h('select', {
+        class: 'mselect',
+        onchange: e => {
+          ctx.skuFilter = e.target.value ? +e.target.value : null;
+          renderMobileFlow(root, ctx);
+        }
+      },
+        h('option', { value: '' }, 'All materials'),
+        ...posPage.positions.map(p => h('option', {
+          value: p.sku_id, selected: ctx.skuFilter === p.sku_id || undefined
+        }, `${p.material} — ${f.qty(p.stock_g)}`)))),
+
+    h('div', { class: 'mlabel', style: { padding: '0 14px' } }, 'Sales',
+      h('span', {}, graph.truncated ? `newest ${sales.length} of ${graph.sales_total}` : `${sales.length} in range`)),
+    h('div', { class: 'mflow' },
+      ...sales.map(sale => {
+        const sources = bySale.get(sale.id) || [];
+        const margin = sources.reduce((s, e) => s + e.margin_paise, 0);
+        return h('div', { class: 'mflow-card' },
+          h('div', { class: 'mflow-head' },
+            h('span', { class: 'mflow-side sell' }, 'SOLD'),
+            h('div', { class: 'grow' },
+              h('b', {}, sale.party),
+              h('span', {}, `${sale.material} · ${f.date(sale.date)}`)),
+            h('div', { class: 'mflow-money' },
+              h('b', { class: 'num ' + (margin >= 0 ? 'up' : 'down') },
+                f.inr(margin, { sign: true, compact: true })),
+              h('span', { class: 'num' }, `${f.qty(sale.qty_g)} @ ${f.rate(sale.rate_paise)}`))),
+          h('div', { class: 'mflow-links' },
+            ...sources.map(e => {
+              const lot = lots.get(e.source) || {};
+              return h('div', { class: 'mflow-link' },
+                h('i', { style: { background: e.margin_paise >= 0 ? 'var(--up)' : 'var(--down)' } }),
+                h('span', { class: 'qty' }, f.qty(e.qty_g)),
+                h('span', { class: 'who' }, `from ${lot.party || '—'} @ ${f.rate(e.cost_paise)}`),
+                h('span', { class: 'pl ' + (e.margin_paise >= 0 ? 'up' : 'down') },
+                  f.rateDelta(e.margin_rate_paise)));
+            }),
+            sale.uncovered_g
+              ? h('div', { class: 'mflow-link down' },
+                  h('i', { style: { background: 'var(--down)' } }),
+                  h('span', { class: 'qty' }, f.qty(sale.uncovered_g)),
+                  h('span', { class: 'who' }, 'uncovered'))
+              : null,
+            sources.length ? null : h('div', { class: 'mflow-empty' }, 'No stock allocated.')));
+      }),
+      sales.length ? null : h('div', { class: 'empty' },
+        h('h3', {}, 'No sales in this window'), h('div', {}, 'Try a longer range.'))),
+
+    idle.length ? [
+      h('div', { class: 'mlabel', style: { padding: '0 14px' } }, 'Still in stock'),
+      h('div', { class: 'mflow' }, ...idle.slice(0, 20).map(lot => {
+        const gone = byLot.get(lot.id) || [];
+        return h('div', { class: 'mflow-card' },
+          h('div', { class: 'mflow-head' },
+            h('span', { class: 'mflow-side lot' }, 'HELD'),
+            h('div', { class: 'grow' },
+              h('b', {}, lot.party),
+              h('span', {}, `${lot.material} · ${lot.deal_ref} · ${f.date(lot.date)}`)),
+            h('div', { class: 'mflow-money' },
+              h('b', { class: 'num' }, f.qty(lot.remaining_g)),
+              h('span', { class: 'num' }, `of ${f.qty(lot.qty_g)} @ ${f.rate(lot.rate_paise)}`))),
+          gone.length
+            ? h('div', { class: 'mflow-links' }, ...gone.map(e => h('div', { class: 'mflow-link' },
+                h('i', { style: { background: 'var(--line-2)' } }),
+                h('span', { class: 'qty' }, f.qty(e.qty_g)),
+                h('span', { class: 'who' }, 'sold on'),
+                h('span', { class: 'pl ' + (e.margin_paise >= 0 ? 'up' : 'down') },
+                  f.inr(e.margin_paise, { sign: true, compact: true })))))
+            : null);
+      }))
+    ] : null));
+}
+
+// ===================================================================== tape
+export async function renderMobileTape(root, appCtx) {
+  ctx = appCtx;
+  const state = { q: '', side: '', rows: [], matched: 0, open: null };
+
+  const list = h('div', { class: 'mflow' });
+  const more = h('button', { class: 'mmore', onclick: loadMore }, 'Load more');
+  const count = h('span', {}, '');
+
+  async function reload() {
+    const page = await api.tape({ limit: 20, q: state.q, side: state.side || undefined });
+    state.rows = page.deals; state.matched = page.matched; paintList();
+  }
+  async function loadMore() {
+    const page = await api.tape({ limit: 20, offset: state.rows.length, q: state.q, side: state.side || undefined });
+    state.rows = state.rows.concat(page.deals); state.matched = page.matched; paintList();
+  }
+
+  function paintList() {
+    count.textContent = `${state.rows.length} of ${state.matched}`;
+    more.hidden = state.rows.length >= state.matched;
+    mount(list, ...state.rows.map(d => dealCard(d)), more);
+    if (!state.rows.length) mount(list, h('div', { class: 'empty' }, h('h3', {}, 'No deals')));
+  }
+
+  function dealCard(d) {
+    const sell = d.side === 'sell';
+    const card = h('div', { class: 'mflow-card' + (d.status === 'cancelled' ? ' off' : '') },
+      h('div', { class: 'mflow-head' },
+        h('span', { class: 'mflow-side ' + (sell ? 'sell' : 'lot') }, sell ? 'SOLD' : 'BOUGHT'),
+        h('div', { class: 'grow' },
+          h('b', {}, d.party_name),
+          h('span', {}, `${d.material} · ${f.date(d.deal_date)} · ${d.ref}`)),
+        h('div', { class: 'mflow-money' },
+          sell
+            ? h('b', { class: 'num ' + (d.margin_paise >= 0 ? 'up' : 'down') },
+                f.inr(d.margin_paise, { sign: true, compact: true }))
+            : h('b', { class: 'num' }, f.inr(d.value_paise, { compact: true })),
+          h('span', { class: 'num' }, `${f.qty(d.qty_g)} @ ${f.rate(d.rate_paise)}`))));
+    card.onclick = async () => {
+      if (card.dataset.open) { card.querySelector('.mflow-links').remove(); delete card.dataset.open; return; }
+      const full = await api.deal(d.id);
+      const lines = sell ? full.allocations : full.sold;
+      card.appendChild(h('div', { class: 'mflow-links' },
+        ...lines.map(a => h('div', { class: 'mflow-link' },
+          h('i', { style: { background: a.margin_paise >= 0 ? 'var(--up)' : 'var(--down)' } }),
+          h('span', { class: 'qty' }, f.qty(a.qty_g)),
+          h('span', { class: 'who' }, sell
+            ? `from ${a.supplier_name} @ ${f.rate(a.cost_paise)}`
+            : `to ${a.customer_name} @ ${f.rate(a.sale_rate_paise)}`),
+          h('span', { class: 'pl ' + (a.margin_paise >= 0 ? 'up' : 'down') },
+            f.inr(a.margin_paise, { sign: true, compact: true })))),
+        lines.length ? null : h('div', { class: 'mflow-empty' },
+          sell ? 'Nothing allocated.' : 'None of this lot sold yet.'),
+        full.status === 'booked'
+          ? h('button', {
+              class: 'mmore', style: { marginTop: '10px' },
+              onclick: async e => {
+                e.stopPropagation();
+                if (!window.confirm(`Cancel ${full.ref}?`)) return;
+                try { await api.cancel(full.id); toast('Cancelled ' + full.ref); reload(); ctx.refresh(); }
+                catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
+              }
+            }, 'Cancel this deal')
+          : null));
+      card.dataset.open = '1';
+    };
+    return card;
+  }
+
+  mount(root, h('div', { class: 'view' },
+    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
+      h('div', { class: 'msearch', style: { marginBottom: '10px' } },
+        h('span', { class: 'dim' }, '⌕'),
+        h('input', {
+          placeholder: 'Party, material, deal ref', value: state.q,
+          oninput: e => { state.q = e.target.value; clearTimeout(state.t); state.t = setTimeout(reload, 250); }
+        })),
+      h('div', { class: 'mchips g3', style: { padding: '0 0 6px' } },
+        ...[['', 'All'], ['buy', 'Bought'], ['sell', 'Sold']].map(([v, label]) => h('button', {
+          class: 'mchip' + (state.side === v ? ' on' : ''),
+          onclick: () => { state.side = v; reload(); }
+        }, label)))),
+    h('div', { class: 'mlabel', style: { padding: '0 14px' } }, 'Trades', count),
+    list));
+  reload();
+}
+
+// ================================================================== position
+export async function renderMobilePosition(root, skuId, appCtx) {
+  ctx = appCtx;
+  const p = await api.position(skuId);
+  const lots = p.lots.filter(l => l.available_g > 0);
+
+  mount(root, h('div', { class: 'view' },
+    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
+      h('button', { class: 'mmore', style: { marginBottom: '12px' }, onclick: () => ctx.go('desk') },
+        '‹ Back to desk'),
+      h('div', { class: 'mpos-hero' },
+        h('b', {}, p.sku.display),
+        h('div', { class: 'mpos-hero-row' },
+          heroStat('In stock', f.qty(p.stock_g)),
+          heroStat('Avg cost', f.rate(p.cost_paise)),
+          heroStat('Mark', p.mark_paise ? f.rate(p.mark_paise) : '—'),
+          heroStat('Open P&L', f.inr(p.unrealised_paise, { sign: true, compact: true }),
+            p.unrealised_paise >= 0 ? 'up' : 'down'))),
+      h('button', {
+        class: 'dock-btn sell', style: { marginTop: '12px', width: '100%' },
+        onclick: () => startTicket('sell', { sku_id: skuId, material: p.sku.display })
+      }, '↑ Sell from this position')),
+
+    h('div', { class: 'mlabel', style: { padding: '0 14px' } }, 'Lots', h('span', {}, `${lots.length} open`)),
+    h('div', { class: 'mflow' }, ...p.lots.map(lot => h('div', { class: 'mflow-card' },
+      h('div', { class: 'mflow-head' },
+        h('span', { class: 'mflow-side lot' }, f.rate(lot.rate_paise)),
+        h('div', { class: 'grow' },
+          h('b', {}, lot.supplier_name),
+          h('span', {}, `${lot.deal_ref} · ${f.date(lot.deal_date)}`)),
+        h('div', { class: 'mflow-money' },
+          h('b', { class: 'num' }, f.qty(lot.available_g)),
+          h('span', { class: 'num' }, `of ${f.qty(lot.qty_g)}`))),
+      lot.outflows && lot.outflows.length
+        ? h('div', { class: 'mflow-links' }, ...lot.outflows.map(o => h('div', { class: 'mflow-link' },
+            h('i', { style: { background: o.margin_paise >= 0 ? 'var(--up)' : 'var(--down)' } }),
+            h('span', { class: 'qty' }, f.qty(o.qty_g)),
+            h('span', { class: 'who' }, `to ${o.customer_name} @ ${f.rate(o.sale_rate_paise)}`),
+            h('span', { class: 'pl ' + (o.margin_paise >= 0 ? 'up' : 'down') },
+              f.inr(o.margin_paise, { sign: true, compact: true })))))
+        : null)))));
+}
+
+function heroStat(label, value, tone) {
+  return h('div', {}, h('span', {}, label), h('b', { class: 'num ' + (tone || '') }, value));
+}
+
+// ==================================================================== setup
+export async function renderMobileSetup(root, appCtx) {
+  ctx = appCtx;
+  const { tree } = await api.catalogTree();
+  const open = ctx.setupOpen || (ctx.setupOpen = {});
+
+  const add = async (body, what) => {
+    try { await api.addCatalog(body); toast(`Added ${what}`); renderMobileSetup(root, ctx); }
+    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
+  };
+  const remove = async (body, what) => {
+    if (!window.confirm(`Remove ${what}?`)) return;
+    try { await api.removeCatalog(body); toast(`Removed ${what}`); renderMobileSetup(root, ctx); }
+    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
+  };
+  const ask = (label, run) => {
+    const v = window.prompt(label);
+    if (v && v.trim()) run(v.trim());
+  };
+
+  mount(root, h('div', { class: 'view' },
+    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
+      h('div', { class: 'mt-hint', style: { marginBottom: '10px' } },
+        'Manufacturer means who made the resin, not who you trade with.'),
+      h('button', {
+        class: 'mmore', onclick: () => ask('New material, e.g. LLDPE', v => add({ material: v }, v))
+      }, '+ Add material')),
+
+    h('div', { class: 'mflow' }, ...tree.map(m => h('div', { class: 'mflow-card' },
+      h('div', {
+        class: 'mflow-head', onclick: () => { open[m.material] = !open[m.material]; renderMobileSetup(root, ctx); }
+      },
+        h('span', { class: 'mflow-side lot' }, open[m.material] ? '▾' : '▸'),
+        h('div', { class: 'grow' },
+          h('b', {}, m.material),
+          h('span', {}, `${m.grades.length} grade${m.grades.length === 1 ? '' : 's'}`)),
+        h('div', { class: 'mflow-money' },
+          m.stock_g ? h('b', { class: 'num up' }, f.qty(m.stock_g)) : null)),
+
+      open[m.material]
+        ? h('div', { class: 'mflow-links' },
+            ...m.grades.map(g => h('div', {},
+              h('div', { class: 'mflow-link', style: { fontWeight: '620' } },
+                h('i', { style: { background: 'var(--accent)' } }),
+                h('span', { class: 'who' }, g.grade),
+                h('span', { class: 'qty' }, g.stock_g ? f.qty(g.stock_g) : ''),
+                h('button', {
+                  class: 'msetup-x',
+                  onclick: () => remove({ material: m.material, grade: g.grade }, `${m.material} ${g.grade}`)
+                }, '×')),
+              ...g.manufacturers.map(k => h('div', { class: 'mflow-link', style: { paddingLeft: '14px' } },
+                h('i', { style: { background: 'var(--line-2)' } }),
+                h('span', { class: 'who' }, k.manufacturer),
+                h('span', { class: 'pl' }, k.deals ? `${k.deals} deals` : 'unused'),
+                h('button', {
+                  class: 'msetup-x',
+                  onclick: () => remove(
+                    { material: m.material, grade: g.grade, manufacturer: k.manufacturer },
+                    k.manufacturer)
+                }, '×'))),
+              h('button', {
+                class: 'mmore', style: { margin: '4px 0 10px 14px' },
+                onclick: () => ask(`New manufacturer for ${m.material} ${g.grade}`,
+                  v => add({ material: m.material, grade: g.grade, manufacturer: v }, v))
+              }, '+ Manufacturer'))),
+            h('button', {
+              class: 'mmore',
+              onclick: () => ask(`New grade for ${m.material}`,
+                v => add({ material: m.material, grade: v }, v))
+            }, '+ Grade'))
+        : null)))));
 }

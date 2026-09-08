@@ -7,7 +7,10 @@ import { renderFlow } from './flow.js';
 import { renderTape, renderPosition } from './tape.js';
 import { startTrade, renderTrade } from './trade.js';
 import { renderSetup } from './setup.js';
-import { mountShell, renderMobileDesk, startTicket, syncTabs, paintHeader } from './mobile.js';
+import {
+  mountShell, renderMobileDesk, renderMobileFlow, renderMobileTape,
+  renderMobilePosition, renderMobileSetup, startTicket, syncTabs, paintHeader
+} from './mobile.js';
 
 // A phone is a different product, not a narrower window: it gets its own shell
 // and its own buy/sell flow. The breakpoint is watched rather than read once,
@@ -64,11 +67,14 @@ function paint() {
     if (isPhone()) renderMobileDesk(main, ctx.desk);
     else renderDesk(main, ctx.desk, ctx);
   }
-  else if (ctx.route === 'flow') renderFlow(main, ctx);
-  else if (ctx.route === 'tape') renderTape(main, ctx);
-  else if (ctx.route === 'position') renderPosition(main, ctx.param, ctx);
+  else if (ctx.route === 'flow') (isPhone() ? renderMobileFlow : renderFlow)(main, ctx);
+  else if (ctx.route === 'tape') (isPhone() ? renderMobileTape : renderTape)(main, ctx);
+  else if (ctx.route === 'position') {
+    if (isPhone()) renderMobilePosition(main, ctx.param, ctx);
+    else renderPosition(main, ctx.param, ctx);
+  }
   else if (ctx.route === 'trade') renderTrade(main);
-  else if (ctx.route === 'setup') renderSetup(main, ctx);
+  else if (ctx.route === 'setup') (isPhone() ? renderMobileSetup : renderSetup)(main, ctx);
 }
 
 function trade(side, opts = {}) {

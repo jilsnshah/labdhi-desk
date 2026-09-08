@@ -79,17 +79,17 @@ body.phone.trading .dock { display: none; }
 .mpos-go:active { background: var(--up); color: #fff; }
 
 /* Repeat a deal you have already done: the fastest path there is. */
-.mrepeat { display: flex; gap: 9px; overflow-x: auto; padding: 2px 14px 4px; scrollbar-width: none; }
-.mrepeat::-webkit-scrollbar { display: none; }
-.mrep { flex: 0 0 auto; background: var(--surface); border: 1px solid var(--line);
-        border-radius: 14px; padding: 11px 14px; text-align: left; min-width: 168px; }
+.mrepeat { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; padding: 2px 14px 4px; }
+.mrep { background: var(--surface); border: 1px solid var(--line); min-width: 0;
+        border-radius: 14px; padding: 11px 13px; text-align: left; }
 .mrep i { font-style: normal; font-size: 10.5px; font-weight: 700; letter-spacing: .08em;
           text-transform: uppercase; }
 .mrep.buy i { color: var(--accent); }
 .mrep.sell i { color: var(--up); }
 .mrep b { display: block; font-size: 14.5px; font-weight: 640; margin-top: 3px;
-          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
-.mrep span { display: block; font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mrep span { display: block; font-size: 12px; color: var(--ink-3); margin-top: 2px;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------------------------------------------------------------- ticket */
 .mtrade { position: fixed; inset: 0; z-index: 60; background: var(--bg);
@@ -146,10 +146,14 @@ body.phone.trading .dock { display: none; }
 .mnum-value small { display: block; font-size: 14px; color: var(--ink-3); margin-top: 7px; }
 .mnum-value.warn b { color: var(--down); }
 
-.mchips { display: flex; gap: 8px; overflow-x: auto; padding: 12px 0 14px; scrollbar-width: none; }
-.mchips::-webkit-scrollbar { display: none; }
-.mchip { flex: 0 0 auto; padding: 12px 18px; border-radius: 13px; background: var(--surface);
-         border: 1px solid var(--line); font-size: 15.5px; font-weight: 620; }
+/* Chips are laid out in a grid, never a scroller. The most useful one on the
+   rate screen is +25 paise, and in a horizontal strip it sat off the edge. */
+.mchips { display: grid; gap: 8px; padding: 12px 0 14px; grid-template-columns: repeat(3, 1fr); }
+.mchips.g2 { grid-template-columns: repeat(2, 1fr); }
+.mchips.g4 { grid-template-columns: repeat(4, 1fr); }
+.mchip { padding: 13px 6px; border-radius: 13px; background: var(--surface); text-align: center;
+         border: 1px solid var(--line); font-size: 15px; font-weight: 620;
+         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mchip:active { border-color: var(--accent); color: var(--accent); }
 .mchip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 
@@ -244,3 +248,56 @@ body.phone .tape,
 body.phone .morebar,
 body.phone .flow-wrap,
 body.phone .range { margin-left: 14px; margin-right: 14px; }
+
+
+/* ---------------------------------------------------------------- flow */
+/* A sankey is a laptop drawing. On a phone the same information reads better
+   as a list: each trade, and directly beneath it the lots it came from or the
+   buyers it went to. Nothing to drag sideways. */
+.mflow { padding: 0 14px 6px; }
+.mflow-card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
+              padding: 14px; margin-bottom: 10px; }
+.mflow-head { display: flex; align-items: flex-start; gap: 11px; }
+.mflow-side { font-size: 10.5px; font-weight: 750; letter-spacing: .07em; padding: 5px 9px;
+              border-radius: 8px; }
+.mflow-side.sell { background: var(--up-soft); color: var(--up); }
+.mflow-side.lot { background: var(--accent-soft); color: var(--accent); }
+.mflow-head .grow { flex: 1; min-width: 0; }
+.mflow-head b { display: block; font-size: 15px; font-weight: 650; white-space: nowrap;
+                overflow: hidden; text-overflow: ellipsis; }
+.mflow-head span { display: block; font-size: 12.5px; color: var(--ink-3); margin-top: 2px; }
+.mflow-money { text-align: right; white-space: nowrap; }
+.mflow-money b { display: block; font-size: 16px; font-weight: 700; }
+.mflow-money span { font-size: 11.5px; color: var(--ink-3); }
+.mflow-links { margin-top: 11px; padding-top: 11px; border-top: 1px solid var(--line);
+               display: flex; flex-direction: column; gap: 8px; }
+.mflow-link { display: flex; align-items: center; gap: 10px; font-size: 13.5px; }
+.mflow-link i { width: 3px; align-self: stretch; border-radius: 2px; flex: 0 0 3px; }
+.mflow-link .who { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden;
+                   text-overflow: ellipsis; }
+.mflow-link .qty { font-weight: 650; font-family: var(--mono); }
+.mflow-link .pl { font-family: var(--mono); font-size: 12.5px; }
+.mflow-empty { font-size: 13px; color: var(--ink-3); padding: 4px 0 2px; }
+
+/* shared bits for the phone screens above */
+.mselect { width: 100%; padding: 14px 15px; border-radius: 13px; background: var(--surface);
+  border: 1px solid var(--line); font-size: 16px; color: var(--ink); appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink-3) 50%),
+                    linear-gradient(135deg, var(--ink-3) 50%, transparent 50%);
+  background-position: calc(100% - 19px) 50%, calc(100% - 14px) 50%;
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+.mmore { width: 100%; padding: 14px; border-radius: 13px; background: var(--surface);
+         border: 1px solid var(--line); font-size: 15px; font-weight: 620; color: var(--ink-2); }
+.mmore:active { border-color: var(--accent); color: var(--accent); }
+.mflow-card.off { opacity: .5; }
+.mflow-card.off .mflow-head b { text-decoration: line-through; }
+.msetup-x { width: 34px; height: 34px; border-radius: 9px; color: var(--ink-3); font-size: 19px;
+            flex: 0 0 34px; }
+.msetup-x:active { background: var(--down-soft); color: var(--down); }
+.mpos-hero { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 16px; }
+.mpos-hero > b { display: block; font-size: 18px; font-weight: 680; letter-spacing: -.01em; }
+.mpos-hero-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+.mpos-hero-row span { display: block; font-size: 10.5px; letter-spacing: .07em;
+                      text-transform: uppercase; color: var(--ink-3); }
+.mpos-hero-row b { display: block; font-size: 19px; font-weight: 700; margin-top: 2px; }
+body.phone .alert { margin-bottom: 9px; }
