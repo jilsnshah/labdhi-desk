@@ -56,6 +56,7 @@ function go(route, param = null) {
   // On a phone the bottom nav and the Book bar would fight for the same strip,
   // so the trade screen owns it alone.
   document.body.classList.toggle('trading', route === 'trade');
+  document.body.classList.toggle('on-desk', route === 'desk');
   for (const b of document.querySelectorAll('.nav button')) b.classList.toggle('on', b.dataset.route === route);
   if (isPhone()) syncTabs();
   main.scrollTop = 0;
@@ -63,6 +64,8 @@ function go(route, param = null) {
 }
 
 function paint() {
+  // Set here rather than in go(), which the first paint never goes through.
+  document.body.classList.toggle('on-desk', ctx.route === 'desk');
   if (ctx.route === 'desk') {
     if (isPhone()) renderMobileDesk(main, ctx.desk);
     else renderDesk(main, ctx.desk, ctx);

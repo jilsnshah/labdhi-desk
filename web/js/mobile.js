@@ -854,6 +854,101 @@ function fanDiagram(sources, target, opts = {}) {
         : null));
 }
 
+// The whole window as one diagram: every purchase lot along the top, every
+// sale along the bottom, and a ribbon for each allocation between them. It is
+// the desktop sankey turned through ninety degrees - flowing top to bottom
+// instead of left to right - which is what lets it fit a phone. Width is
+// whatever it is given; only the height grows.
+function overviewDiagram(graph, onPick) {
+  const W = 358, BAND = 30, H = 300, TOP = 4, BOT = H - BAND - 4;
+  const lots = graph.nodes.filter(n => n.kind === 'lot');
+  const sales = graph.nodes.filter(n => n.kind === 'sale');
+  if (!lots.length && !sales.length) return null;
+
+  const rates = lots.map(n => n.rate_paise);
+  const low = Math.min(...rates), high = Math.max(...rates);
+  const lotTotal = lots.reduce((s, n) => s + n.qty_g, 0) || 1;
+  const saleTotal = sales.reduce((s, n) => s + n.qty_g, 0) || 1;
+  // Both rows are drawn against the same scale. Stretching each to full width
+  // would make 72 MT sold look like all 169 MT bought.
+  const scale = Math.max(lotTotal, saleTotal);
+
+  // Lay each row out proportionally, but never thinner than a fingertip.
+  const place = (nodes, total) => {
+    const MIN = 7, gap = 2;
+    const room = (total / scale) * W - gap * Math.max(0, nodes.length - 1);
+    const raw = nodes.map(n => (n.qty_g / total) * room);
+    const lift = raw.reduce((s, w) => s + Math.max(0, MIN - w), 0);
+    const shrinkable = raw.reduce((s, w) => s + Math.max(0, w - MIN), 0) || 1;
+    let x = 0;
+    const map = new Map();
+    nodes.forEach((n, i) => {
+      let w = raw[i] < MIN ? MIN : raw[i] - (raw[i] - MIN) * (lift / shrinkable);
+      map.set(n.id, { node: n, x, w, cursor: x });
+      x += w + gap;
+    });
+    return map;
+  };
+
+  const L = place(lots, lotTotal), S = place(sales, saleTotal);
+  const soldPct = Math.round((saleTotal / lotTotal) * 100);
+  const ribbons = [], bands = [];
+
+  for (const e of graph.edges) {
+    const a = L.get(e.source), b = S.get(e.target);
+    if (!a || !b) continue;
+    const aw = (e.qty_g / a.node.qty_g) * a.w;
+    const bw = (e.qty_g / b.node.qty_g) * b.w;
+    const x0 = a.cursor, x1 = a.cursor + aw, t0 = b.cursor, t1 = b.cursor + bw;
+    a.cursor += aw; b.cursor += bw;
+    const my = (TOP + BAND + BOT) / 2;
+    ribbons.push(svg('path', {
+      class: 'movr', data: { lot: e.source, sale: e.target },
+      d: `M${x0},${TOP + BAND} C${x0},${my} ${t0},${my} ${t0},${BOT}
+          L${t1},${BOT} C${t1},${my} ${x1},${my} ${x1},${TOP + BAND} Z`,
+      fill: e.margin_paise >= 0 ? 'var(--up)' : 'var(--down)', 'fill-opacity': .2
+    }));
+  }
+
+  for (const { node, x, w, cursor } of L.values()) {
+    const soldW = cursor - x;
+    bands.push(svg('rect', {
+      class: 'moband', data: { id: node.id }, x, y: TOP, width: w, height: BAND, rx: 5,
+      fill: costShade(node.rate_paise, low, high),
+      onclick: () => onPick({ kind: 'lot', node })
+    }));
+    if (soldW < w - 0.5) {
+      bands.push(svg('rect', {
+        x: x + soldW, y: TOP, width: w - soldW, height: BAND, rx: 5,
+        fill: 'var(--bg)', 'fill-opacity': .62, 'pointer-events': 'none'
+      }));
+    }
+  }
+
+  for (const { node, x, w, cursor } of S.values()) {
+    const covered = cursor - x;
+    bands.push(svg('rect', {
+      class: 'moband', data: { id: node.id }, x, y: BOT, width: w, height: BAND, rx: 5,
+      fill: 'var(--up)', 'fill-opacity': .85,
+      onclick: () => onPick({ kind: 'sale', node })
+    }));
+    if (covered < w - 0.5) {
+      bands.push(svg('rect', {
+        x: x + covered, y: BOT, width: w - covered, height: BAND, rx: 5,
+        fill: 'var(--down)', 'fill-opacity': .4, 'pointer-events': 'none'
+      }));
+    }
+  }
+
+  return h('div', { class: 'moview' },
+    h('div', { class: 'moview-side' },
+      h('span', {}, 'BOUGHT'), h('b', { class: 'num' }, f.qty(lotTotal))),
+    svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'moview-svg' }, ...ribbons, ...bands),
+    h('div', { class: 'moview-side bottom' },
+      h('span', {}, 'SOLD'), h('b', { class: 'num' }, f.qty(saleTotal)),
+      h('em', {}, `${soldPct}% of what was bought`)));
+}
+
 // ===================================================================== flow
 // The lineage, told downwards. Each sale carries the lots it came from; each
 // purchase still holding stock says where the rest of it went. Same data as the
@@ -909,7 +1004,30 @@ export async function renderMobileFlow(root, appCtx) {
           value: p.sku_id, selected: ctx.skuFilter === p.sku_id || undefined
         }, `${p.material} — ${f.qty(p.stock_g)}`)))),
 
-    h('div', { class: 'mlabel', style: { padding: '0 14px' } }, 'Sales',
+    h('div', { class: 'mflow' },
+      overviewDiagram(graph, sel => {
+        const box = document.getElementById('mo-detail');
+        if (!box) return;
+        const n = sel.node;
+        mount(box, sel.kind === 'lot'
+          ? h('div', { class: 'mo-detail' },
+              h('b', {}, `${n.party} · ${f.qty(n.qty_g)} @ ${f.rate(n.rate_paise)}`),
+              h('span', {}, `${n.material} · ${n.deal_ref} · ${f.date(n.date)} · ` +
+                `${f.qty(n.remaining_g)} still in stock`))
+          : h('div', { class: 'mo-detail' },
+              h('b', {}, `${n.party} · ${f.qty(n.qty_g)} @ ${f.rate(n.rate_paise)}`),
+              h('span', {}, `${n.material} · ${n.deal_ref} · ${f.date(n.date)}`)));
+      }),
+      h('div', { id: 'mo-detail' },
+        h('div', { class: 'mo-detail hint' },
+          h('span', {}, 'Each block is a trade, sized by quantity. Tap one to name it.'))),
+      h('div', { class: 'mo-key' },
+        h('span', {}, h('i', { style: { background: 'hsl(202 38% 62%)' } }), 'cheap stock'),
+        h('span', {}, h('i', { style: { background: 'hsl(192 54% 34%)' } }), 'dear stock'),
+        h('span', {}, h('i', { style: { background: 'var(--up)', opacity: .3 } }), 'profitable flow'),
+        h('span', {}, h('i', { style: { background: 'var(--bg)', border: '1px solid var(--line-2)' } }), 'unsold'))),
+
+    h('div', { class: 'mlabel', style: { padding: '0 14px' } }, 'Sale by sale',
       h('span', {}, graph.truncated ? `newest ${sales.length} of ${graph.sales_total}` : `${sales.length} in range`)),
     h('div', { class: 'mflow' },
       ...sales.map(sale => {
