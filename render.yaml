@@ -21,8 +21,8 @@ services:
         value: "3.11.9"
       - key: LABDHI_DB
         value: /var/data/labdhi.db
-      - key: LABDHI_TOKEN          # every API call must present this
-        generateValue: true
+      - key: LABDHI_PASSWORD       # every API call must present this
+        sync: false
       - key: LABDHI_ORIGINS        # set to the Vercel URL once it exists
         sync: false
       - key: LABDHI_SEED           # "1" fills an empty book with demo deals

@@ -99,14 +99,12 @@ onSlow(on => { waking.hidden = !on; });
 // prompt works but looks like a phishing box, so it gets a real screen.
 setTokenPrompt(() => new Promise(resolve => {
   const input = h('input', {
-    type: 'password', placeholder: 'Paste your access token',
+    type: 'password', placeholder: 'Password', autocomplete: 'current-password',
     onkeydown: e => { if (e.key === 'Enter') submit(); }
   });
   const card = h('div', { class: 'unlock-card' },
-    h('div', { class: 'unlock-title' }, 'This desk is locked'),
-    h('div', { class: 'unlock-sub' },
-      'It is on a public URL, so the book is behind an access token. ' +
-      'Ask whoever set it up, or read LABDHI_TOKEN from the server settings.'),
+    h('div', { class: 'unlock-title' }, 'Labdhi Desk'),
+    h('div', { class: 'unlock-sub' }, 'Enter the password to open the book.'),
     input,
     h('button', { class: 'confirm buy', onclick: () => submit() }, 'Unlock'));
   const screen = h('div', { class: 'unlock' }, card);
