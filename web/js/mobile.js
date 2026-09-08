@@ -987,7 +987,7 @@ export async function renderMobileFlow(root, appCtx) {
 
   mount(root, h('div', { class: 'view' },
     h('div', { class: 'mflow', style: { paddingTop: '14px' } },
-      h('div', { class: 'mchips g4', style: { padding: '0 0 12px' } },
+      h('div', { class: 'mchips g4 filter', style: { padding: '0 0 10px' } },
         ...RANGES.map(([label, days]) => h('button', {
           class: 'mchip' + (ctx.flowDays === days ? ' on' : ''),
           onclick: () => { ctx.flowDays = days; renderMobileFlow(root, ctx); }
@@ -1045,7 +1045,7 @@ export async function renderMobileFlow(root, appCtx) {
             h('span', { class: 'mflow-side sell' }, 'SOLD'),
             h('div', { class: 'grow' },
               h('b', {}, sale.party),
-              h('span', {}, `${sale.material} · ${f.date(sale.date)}`)),
+              h('span', {}, `${f.date(sale.date)} · ${sale.material}`)),
             h('div', { class: 'mflow-money' },
               h('b', { class: 'num ' + (margin >= 0 ? 'up' : 'down') },
                 f.inr(margin, { sign: true, compact: true })),
@@ -1107,7 +1107,7 @@ export async function renderMobileFlow(root, appCtx) {
             h('span', { class: 'mflow-side lot' }, 'HELD'),
             h('div', { class: 'grow' },
               h('b', {}, lot.party),
-              h('span', {}, `${lot.material} · ${lot.deal_ref} · ${f.date(lot.date)}`)),
+              h('span', {}, `${f.date(lot.date)} · ${lot.material}`)),
             h('div', { class: 'mflow-money' },
               h('b', { class: 'num' }, f.qty(lot.remaining_g)),
               h('span', { class: 'num' }, `of ${f.qty(lot.qty_g)} @ ${f.rate(lot.rate_paise)}`))),
@@ -1156,7 +1156,7 @@ export async function renderMobileTape(root, appCtx) {
         h('span', { class: 'mflow-side ' + (sell ? 'sell' : 'lot') }, sell ? 'SOLD' : 'BOUGHT'),
         h('div', { class: 'grow' },
           h('b', {}, d.party_name),
-          h('span', {}, `${d.material} · ${f.date(d.deal_date)} · ${d.ref}`)),
+          h('span', {}, `${f.date(d.deal_date)} · ${d.material}`)),
         h('div', { class: 'mflow-money' },
           sell
             ? h('b', { class: 'num ' + (d.margin_paise >= 0 ? 'up' : 'down') },
@@ -1217,7 +1217,7 @@ export async function renderMobileTape(root, appCtx) {
           placeholder: 'Party, material, deal ref', value: state.q,
           oninput: e => { state.q = e.target.value; clearTimeout(state.t); state.t = setTimeout(reload, 250); }
         })),
-      h('div', { class: 'mchips g3', style: { padding: '0 0 6px' } },
+      h('div', { class: 'mchips g3 filter', style: { padding: '0 0 4px' } },
         ...[['', 'All'], ['buy', 'Bought'], ['sell', 'Sold']].map(([v, label]) => h('button', {
           class: 'mchip' + (state.side === v ? ' on' : ''),
           onclick: () => { state.side = v; reload(); }
@@ -1451,7 +1451,7 @@ export async function renderMobileSetup(root, appCtx) {
 
   mount(root, h('div', { class: 'view' },
     h('div', { class: 'mflow', style: { paddingTop: '14px' } },
-      h('div', { class: 'mchips g2', style: { padding: '0 0 12px' } },
+      h('div', { class: 'mchips g2 filter', style: { padding: '0 0 10px' } },
         h('button', {
           class: 'mchip' + (tab === 'parties' ? ' on' : ''), onclick: () => show('parties')
         }, `Buyers & sellers · ${parties.length}`),

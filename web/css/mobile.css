@@ -372,3 +372,99 @@ body.phone .alert { margin-bottom: 9px; }
 .mo-key { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 12px; }
 .mo-key span { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink-2); }
 .mo-key i { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 11px; }
+
+/* ==================================================================== scale
+   The phone had been inheriting the desktop type scale, so a filter chip came
+   out 50px tall at 15px type and a position row took 79px. On a 568px screen
+   that is four rows of stock.
+
+   The rule applied below: anything the trader *acts* on stays at a comfortable
+   tap size - Buy and Sell, the numeric pad, the choices inside a ticket. Every-
+   thing he only *reads* or *browses* gets tighter. Nothing interactive is
+   allowed under 40px. */
+@media (max-width: 760px) {
+  body.phone { font-size: 14px; }
+
+  /* --- header ------------------------------------------------------ */
+  .mhead-name { font-size: 14.5px; }
+  .mhead-stat b { font-size: 14px; }
+  .mhead-strip div { font-size: 11.5px; }
+
+  /* --- section labels ---------------------------------------------- */
+  .mlabel { font-size: 10px; letter-spacing: .09em; margin: 16px 0 8px; }
+  .mlabel span { font-size: 11.5px; }
+  .mt-hint { font-size: 12.5px; }
+
+  /* --- browsing chrome: filters, search, secondary buttons ---------- */
+  .mchip { font-size: 13.5px; padding: 11px 8px; border-radius: 11px; }
+  .msearch { padding: 11px 14px; border-radius: 12px; }
+  .msearch input { font-size: 15px; }
+  .mselect { font-size: 14.5px; padding: 12px 14px; }
+  .mmore { font-size: 13.5px; padding: 12px; }
+  .filt-toggle { font-size: 13.5px; padding: 10px 15px; }
+  body.phone .tag { font-size: 11.5px; padding: 4px 9px; }
+
+  /* --- position rows ------------------------------------------------ */
+  .mpos { padding: 12px; gap: 10px; border-radius: 13px; margin-bottom: 8px; }
+  .mpos-name { font-size: 14.5px; }
+  .mpos-sub { font-size: 11.5px; margin-top: 2px; }
+  .mpos-qty b { font-size: 17px; }
+  .mpos-qty span { font-size: 11px; }
+  .mpos-go { width: 42px; height: 42px; flex-basis: 42px; font-size: 19px; border-radius: 12px; }
+
+  /* --- cards: flow, tape, setup, position --------------------------- */
+  .mflow-card { padding: 12px; border-radius: 13px; margin-bottom: 8px; }
+  .mflow-head { gap: 9px; }
+  .mflow-head b { font-size: 14px; }
+  .mflow-head span { font-size: 11.5px; }
+  .mflow-side { font-size: 9.5px; padding: 4px 7px; border-radius: 7px; }
+  .mflow-money b { font-size: 14.5px; }
+  .mflow-money span { font-size: 10.5px; }
+  .mflow-links { margin-top: 9px; padding-top: 9px; gap: 6px; }
+  .mflow-link { font-size: 12.5px; gap: 8px; }
+  .mflow-link .pl { font-size: 11.5px; }
+  .mo-key span, .mfan-key span { font-size: 11.5px; }
+  .mo-detail b { font-size: 13.5px; }
+  .mo-detail span { font-size: 11.5px; }
+  body.phone .alert { padding: 12px 14px; gap: 11px; }
+  body.phone .alert b { font-size: 14px; }
+  body.phone .alert span { font-size: 12.5px; }
+
+  /* --- position hero ------------------------------------------------ */
+  .mpos-hero { padding: 14px; }
+  .mpos-hero > b { font-size: 16px; }
+  .mpos-hero-row b { font-size: 17px; }
+  .mpos-hero-row span { font-size: 9.5px; }
+
+  /* --- the ticket keeps its size: this is the part being used at speed */
+  .mt-q { font-size: 20px; }
+  .mopt { padding: 14px 15px; margin-bottom: 8px; }
+  .mopt-main b { font-size: 15.5px; }
+  .mopt-main span { font-size: 12px; }
+  .mlot { padding: 13px; }
+  .mlot-rate { font-size: 18px; min-width: 68px; }
+  .mlot-main b { font-size: 13.5px; }
+  .mlot-take b { font-size: 15.5px; }
+  .mrev-row { padding: 12px 0; }
+  .mrev-row span { font-size: 11.5px; min-width: 84px; }
+  .mrev-row b { font-size: 15px; }
+  /* value readout, pad and confirm stay deliberately large */
+  .mnum-value b { font-size: 46px; }
+  .mkey { height: 58px; font-size: 24px; }
+  .mt-next, .mt-skip { height: 50px; font-size: 16.5px; }
+}
+
+/* A filter is not a primary action. It gets a segmented-control height (~34px,
+   the same as the platform's own) rather than the 44px reserved for the things
+   a trader taps mid-call. */
+@media (max-width: 760px) {
+  .mchips.filter { gap: 6px; }
+  .mchips.filter .mchip { padding: 8px 6px; font-size: 12.5px; border-radius: 9px;
+                          font-weight: 600; }
+
+  /* Card meta on one line: a wrapped second line costs a whole row of history. */
+  .mflow-head span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mflow-head .grow { min-width: 0; }
+  .msearch { padding: 10px 13px; }
+  .msearch input { font-size: 14.5px; }
+}
