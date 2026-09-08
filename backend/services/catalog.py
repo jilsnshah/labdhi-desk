@@ -61,13 +61,18 @@ def search_parties(term: str = "", role: Optional[str] = None, limit: int = 8) -
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     side = "buy" if role == "supplier" else ("sell" if role == "customer" else None)
     side_filter = "AND d.side='%s'" % side if side else ""
+    # The ordering wraps the query rather than sorting on aliases in place:
+    # Postgres accepts a bare alias in ORDER BY but not one inside an
+    # expression, so `(last_deal IS NULL)` only works once it is a real column.
     sql = """
-        SELECT p.*,
-               (SELECT COUNT(*) FROM deals d WHERE d.party_id=p.id {sf}) AS deal_count,
-               (SELECT MAX(d.deal_date) FROM deals d WHERE d.party_id=p.id {sf}) AS last_deal
-        FROM parties p
-        {clause}
-        ORDER BY (last_deal IS NULL), last_deal DESC, deal_count DESC, p.name
+        SELECT * FROM (
+            SELECT p.*,
+                   (SELECT COUNT(*) FROM deals d WHERE d.party_id=p.id {sf}) AS deal_count,
+                   (SELECT MAX(d.deal_date) FROM deals d WHERE d.party_id=p.id {sf}) AS last_deal
+            FROM parties p
+            {clause}
+        ) ranked
+        ORDER BY (last_deal IS NULL), last_deal DESC, deal_count DESC, name
         LIMIT ?
     """.format(sf=side_filter, clause=clause)
     return [dict(r) for r in db.q(sql, args + [limit])]
