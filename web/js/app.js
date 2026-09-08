@@ -1,7 +1,7 @@
 // Shell: state, routing, keyboard. Every screen is a full page — nothing in
 // this app opens in a dialog, because a trade deserves the whole window.
 import { h, mount, $, toast } from './ui.js';
-import { api, setTokenPrompt } from './api.js';
+import { api, setTokenPrompt, onSlow } from './api.js';
 import { renderDesk, renderTicker } from './desk.js';
 import { renderFlow } from './flow.js';
 import { renderTape, renderPosition } from './tape.js';
@@ -83,6 +83,16 @@ window.addEventListener('keydown', e => {
       .catch(err => toast(err.message, { kind: 'err' }));
   }
 });
+
+// The server is asleep more often than it is broken. Say so.
+const waking = h('div', { class: 'waking', hidden: true },
+  h('div', { class: 'waking-card' },
+    h('div', { class: 'waking-spin' }),
+    h('div', {},
+      h('b', {}, 'Waking the server'),
+      h('span', {}, 'It sleeps when idle to stay free. This takes about a minute, once.'))));
+document.body.appendChild(waking);
+onSlow(on => { waking.hidden = !on; });
 
 // ---------------------------------------------------------------- unlock
 // A deployed desk is behind a shared token. Asking for it through a browser

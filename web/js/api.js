@@ -17,23 +17,57 @@ let askForToken = async () => {
 };
 export const setTokenPrompt = fn => { askForToken = fn; };
 
-async function call(path, opts = {}) {
+// Render's free tier stops the instance after ~15 minutes idle, and the next
+// request pays ~50 seconds to boot it. Without a word on screen that reads as
+// a broken app, so any call that takes more than a moment announces itself and
+// a cold-start failure is retried rather than surfaced as an error.
+let inFlight = 0;
+const slow = new EventTarget();
+export const onSlow = fn => slow.addEventListener('slow', e => fn(e.detail));
+
+async function call(path, opts = {}, attempt = 0) {
   const token = getToken();
-  const res = await fetch(base() + path, {
+  inFlight++;
+  const timer = setTimeout(() => slow.dispatchEvent(
+    new CustomEvent('slow', { detail: true })), 2500);
+  const done = () => {
+    clearTimeout(timer);
+    if (--inFlight <= 0) slow.dispatchEvent(new CustomEvent('slow', { detail: false }));
+  };
+
+  let res;
+  try {
+    res = await fetch(base() + path, {
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { 'X-Labdhi-Token': token } : {})
     },
-    ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined
-  });
+      ...opts,
+      body: opts.body ? JSON.stringify(opts.body) : undefined
+    });
+  } catch (err) {
+    done();
+    // A dropped connection while the instance boots is not a real failure.
+    if (attempt < 3) {
+      await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+      return call(path, opts, attempt + 1);
+    }
+    throw new Error('Could not reach the server. Check your connection.');
+  }
+  if ((res.status === 502 || res.status === 503) && attempt < 4) {
+    done();
+    await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+    return call(path, opts, attempt + 1);
+  }
   if (res.status === 401) {
+    done();
     const entered = await askForToken();
     if (entered) { setToken(entered); return call(path, opts); }
     throw new Error('Access token required');
   }
   let data = null;
   try { data = await res.json(); } catch (_) { data = null; }
+  done();
   if (!res.ok) {
     const msg = (data && (data.error || data.detail)) || `Request failed (${res.status})`;
     throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));

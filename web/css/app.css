@@ -411,6 +411,15 @@ main{overflow:auto;padding:26px 24px 60px}
 .empty{padding:70px 20px;text-align:center;color:var(--ink-3)}
 .empty h3{color:var(--ink-2);font-weight:620;margin:0 0 8px;font-size:20px}
 
+.waking{position:fixed;left:50%;top:18px;transform:translateX(-50%);z-index:150}
+.waking-card{display:flex;align-items:center;gap:14px;padding:14px 20px;border-radius:14px;
+  background:var(--ink);color:#fff;box-shadow:var(--shadow-lg);max-width:calc(100vw - 28px)}
+.waking-card b{display:block;font-size:15px}
+.waking-card span{font-size:13px;opacity:.75}
+.waking-spin{width:18px;height:18px;flex:0 0 18px;border-radius:50%;
+  border:2px solid #ffffff40;border-top-color:#fff;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
 .unlock{position:fixed;inset:0;z-index:200;display:grid;place-items:center;
   background:var(--bg);padding:24px}
 .unlock-card{width:min(440px,100%);background:var(--surface);border:1px solid var(--line);
