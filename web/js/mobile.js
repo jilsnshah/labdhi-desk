@@ -124,6 +124,7 @@ export function startTicket(side, prefill = {}) {
     qty_g: 0, rate_paise: 0, entry: '',
     lastRate: prefill.rate_paise || 0,
     options: [], query: '', browse: null, editingLot: null,
+    terms: { transporter: '', freight_by: '', delivery_by: '', payment_terms: '', eway: '', remarks: '' },
     date: todayISO(), busy: false, error: ''
   };
   document.body.classList.add('trading');
@@ -589,7 +590,9 @@ function stepReview() {
       row('Material', ms.sku.display, () => jump('what')),
       row('Quantity', f.qty(ms.qty_g), () => jump('qty')),
       row('Rate', f.rate(ms.rate_paise) + '/kg', () => jump('rate')),
-      row('Value', f.inr(valuePaise(ms.qty_g, ms.rate_paise)))),
+      row('Value', f.inr(valuePaise(ms.qty_g, ms.rate_paise))),
+      row('Date', f.date(ms.date), openTerms),
+      row('Transport', termsSummary(), openTerms)),
     sell && cost
       ? h('div', { class: 'mlive ' + (margin >= 0 ? 'good' : 'bad') },
           h('div', { class: 'mlive-top' },
@@ -599,6 +602,40 @@ function stepReview() {
       : null,
     ms.error ? h('div', { class: 'need' }, ms.error) : null
   ];
+}
+
+// Transport, payment and e-way are recorded, never calculated, so they sit
+// behind one tap on the last screen instead of adding a step to every deal.
+function termsSummary() {
+  const t = ms.terms;
+  const bits = [];
+  if (t.transporter) bits.push(t.transporter);
+  if (t.freight_by) bits.push(`freight: ${t.freight_by}`);
+  if (t.delivery_by) bits.push(`delivery: ${t.delivery_by}`);
+  if (t.payment_terms) bits.push(t.payment_terms);
+  if (t.eway) bits.push(`e-way: ${t.eway}`);
+  if (t.remarks) bits.push(t.remarks);
+  return bits.length ? bits.join(' · ') : 'Not set';
+}
+
+function openTerms() {
+  const t = ms.terms;
+  sheet('Transport & payment', [
+    { key: 'date', label: 'Deal date', type: 'date', value: ms.date },
+    { key: 'transporter', label: 'Transporter', value: t.transporter, placeholder: 'Ekta' },
+    { key: 'freight_by', label: 'Freight paid by', type: 'choice',
+      options: ['Buyer', 'Seller'], value: t.freight_by },
+    { key: 'delivery_by', label: 'Delivery by', type: 'choice',
+      options: ['Buyer', 'Seller'], value: t.delivery_by },
+    { key: 'payment_terms', label: 'Payment', value: t.payment_terms, placeholder: '30 days' },
+    { key: 'eway', label: 'E-way bill', value: t.eway, placeholder: 'ASL to buyer' },
+    { key: 'remarks', label: 'Note', value: t.remarks, placeholder: 'anything worth remembering' }
+  ], values => {
+    ms.date = values.date || ms.date;
+    delete values.date;
+    ms.terms = values;
+    paint();
+  });
 }
 
 function row(label, value, onEdit) {
@@ -696,6 +733,12 @@ async function book() {
       qty_g: ms.qty_g,
       rate_paise: ms.rate_paise,
       deal_date: ms.date,
+      transporter: ms.terms.transporter || undefined,
+      freight_by: ms.terms.freight_by || undefined,
+      delivery_by: ms.terms.delivery_by || undefined,
+      payment_terms: ms.terms.payment_terms || undefined,
+      eway: ms.terms.eway || undefined,
+      remarks: ms.terms.remarks || undefined,
       pins: effectiveAlloc() || undefined,
       allow_short: false,
       confirm: true
@@ -1117,6 +1160,19 @@ function heroStat(label, value, tone) {
 function sheet(title, fields, onSave) {
   const inputs = {};
   const body = fields.map(fl => {
+    if (fl.type === 'choice') {
+      let value = fl.value || '';
+      const btns = fl.options.map(opt => h('button', {
+        class: 'msheet-toggle' + (value === opt ? ' on' : ''),
+        onclick: () => {
+          value = value === opt ? '' : opt;
+          for (const b of btns) b.classList.toggle('on', b.textContent === value);
+        }
+      }, opt));
+      inputs[fl.key] = () => value;
+      return h('div', { class: 'msheet-field' },
+        h('span', {}, fl.label), h('div', { class: 'msheet-toggles' }, ...btns));
+    }
     if (fl.type === 'toggle') {
       const btn = h('button', {
         class: 'msheet-toggle' + (fl.value ? ' on' : ''),
@@ -1196,9 +1252,12 @@ export async function renderMobileSetup(root, appCtx) {
     catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
   };
 
-  mount(root, h('div', { class: 'view' },
-    h('div', { class: 'mlabel', style: { padding: '14px 14px 10px' } },
-      'Buyers & sellers', h('span', {}, `${parties.length}`)),
+  // Two lists, one at a time. Stacking them meant scrolling past every
+  // counterparty to reach "add material".
+  const tab = ctx.setupTab || (ctx.setupTab = 'parties');
+  const show = t => { ctx.setupTab = t; renderMobileSetup(root, ctx); };
+
+  const partiesView = [
     h('div', { class: 'mflow' },
       h('button', { class: 'mmore', style: { marginBottom: '10px' }, onclick: () => editParty(null) },
         '+ Add buyer or seller'),
@@ -1214,57 +1273,72 @@ export async function renderMobileSetup(root, appCtx) {
         h('div', { class: 'mparty-tags' },
           p.is_customer ? h('span', { class: 'tag up' }, 'Buyer') : null,
           p.is_supplier ? h('span', { class: 'tag' }, 'Seller') : null,
-          !p.is_customer && !p.is_supplier ? h('span', { class: 'tag' }, 'No role set') : null)))),
+          !p.is_customer && !p.is_supplier ? h('span', { class: 'tag' }, 'No role set') : null))))
+  ];
 
-    h('div', { class: 'mlabel', style: { padding: '18px 14px 10px' } }, 'Materials'),
-    h('div', { class: 'mflow', style: { paddingTop: '0' } },
+  const materialsView = [
+    h('div', { class: 'mflow' },
+      h('button', {
+        class: 'mmore', style: { marginBottom: '10px' },
+        onclick: () => ask('New material, e.g. LLDPE', v => add({ material: v }, v))
+      }, '+ Add material'),
       h('div', { class: 'mt-hint', style: { marginBottom: '10px' } },
         'Manufacturer means who made the resin, not who you trade with.'),
-      h('button', {
-        class: 'mmore', onclick: () => ask('New material, e.g. LLDPE', v => add({ material: v }, v))
-      }, '+ Add material')),
+      ...tree.map(m => h('div', { class: 'mflow-card' },
+        h('div', {
+          class: 'mflow-head',
+          onclick: () => { open[m.material] = !open[m.material]; renderMobileSetup(root, ctx); }
+        },
+          h('span', { class: 'mflow-side lot' }, open[m.material] ? '▾' : '▸'),
+          h('div', { class: 'grow' },
+            h('b', {}, m.material),
+            h('span', {}, `${m.grades.length} grade${m.grades.length === 1 ? '' : 's'}`)),
+          h('div', { class: 'mflow-money' },
+            m.stock_g ? h('b', { class: 'num up' }, f.qty(m.stock_g)) : null)),
 
-    h('div', { class: 'mflow' }, ...tree.map(m => h('div', { class: 'mflow-card' },
-      h('div', {
-        class: 'mflow-head', onclick: () => { open[m.material] = !open[m.material]; renderMobileSetup(root, ctx); }
-      },
-        h('span', { class: 'mflow-side lot' }, open[m.material] ? '▾' : '▸'),
-        h('div', { class: 'grow' },
-          h('b', {}, m.material),
-          h('span', {}, `${m.grades.length} grade${m.grades.length === 1 ? '' : 's'}`)),
-        h('div', { class: 'mflow-money' },
-          m.stock_g ? h('b', { class: 'num up' }, f.qty(m.stock_g)) : null)),
-
-      open[m.material]
-        ? h('div', { class: 'mflow-links' },
-            ...m.grades.map(g => h('div', {},
-              h('div', { class: 'mflow-link', style: { fontWeight: '620' } },
-                h('i', { style: { background: 'var(--accent)' } }),
-                h('span', { class: 'who' }, g.grade),
-                h('span', { class: 'qty' }, g.stock_g ? f.qty(g.stock_g) : ''),
-                h('button', {
-                  class: 'msetup-x',
-                  onclick: () => remove({ material: m.material, grade: g.grade }, `${m.material} ${g.grade}`)
-                }, '×')),
-              ...g.manufacturers.map(k => h('div', { class: 'mflow-link', style: { paddingLeft: '14px' } },
-                h('i', { style: { background: 'var(--line-2)' } }),
-                h('span', { class: 'who' }, k.manufacturer),
-                h('span', { class: 'pl' }, k.deals ? `${k.deals} deals` : 'unused'),
-                h('button', {
-                  class: 'msetup-x',
-                  onclick: () => remove(
-                    { material: m.material, grade: g.grade, manufacturer: k.manufacturer },
-                    k.manufacturer)
-                }, '×'))),
+        open[m.material]
+          ? h('div', { class: 'mflow-links' },
               h('button', {
-                class: 'mmore', style: { margin: '4px 0 10px 14px' },
-                onclick: () => ask(`New manufacturer for ${m.material} ${g.grade}`,
-                  v => add({ material: m.material, grade: g.grade, manufacturer: v }, v))
-              }, '+ Manufacturer'))),
-            h('button', {
-              class: 'mmore',
-              onclick: () => ask(`New grade for ${m.material}`,
-                v => add({ material: m.material, grade: v }, v))
-            }, '+ Grade'))
-        : null)))));
+                class: 'mmore', style: { marginBottom: '6px' },
+                onclick: () => ask(`New grade for ${m.material}`,
+                  v => add({ material: m.material, grade: v }, v))
+              }, '+ Grade'),
+              ...m.grades.map(g => h('div', {},
+                h('div', { class: 'mflow-link', style: { fontWeight: '620' } },
+                  h('i', { style: { background: 'var(--accent)' } }),
+                  h('span', { class: 'who' }, g.grade),
+                  h('span', { class: 'qty' }, g.stock_g ? f.qty(g.stock_g) : ''),
+                  h('button', {
+                    class: 'msetup-x',
+                    onclick: () => remove({ material: m.material, grade: g.grade },
+                      `${m.material} ${g.grade}`)
+                  }, '×')),
+                ...g.manufacturers.map(k => h('div', { class: 'mflow-link', style: { paddingLeft: '14px' } },
+                  h('i', { style: { background: 'var(--line-2)' } }),
+                  h('span', { class: 'who' }, k.manufacturer),
+                  h('span', { class: 'pl' }, k.deals ? `${k.deals} deals` : 'unused'),
+                  h('button', {
+                    class: 'msetup-x',
+                    onclick: () => remove(
+                      { material: m.material, grade: g.grade, manufacturer: k.manufacturer },
+                      k.manufacturer)
+                  }, '×'))),
+                h('button', {
+                  class: 'mmore', style: { margin: '4px 0 10px 14px' },
+                  onclick: () => ask(`New manufacturer for ${m.material} ${g.grade}`,
+                    v => add({ material: m.material, grade: g.grade, manufacturer: v }, v))
+                }, '+ Manufacturer'))))
+          : null)))
+  ];
+
+  mount(root, h('div', { class: 'view' },
+    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
+      h('div', { class: 'mchips g2', style: { padding: '0 0 12px' } },
+        h('button', {
+          class: 'mchip' + (tab === 'parties' ? ' on' : ''), onclick: () => show('parties')
+        }, `Buyers & sellers · ${parties.length}`),
+        h('button', {
+          class: 'mchip' + (tab === 'materials' ? ' on' : ''), onclick: () => show('materials')
+        }, `Materials · ${tree.length}`))),
+    ...(tab === 'parties' ? partiesView : materialsView)));
 }
