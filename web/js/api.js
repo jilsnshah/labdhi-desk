@@ -9,6 +9,14 @@ export const setToken = t => { try { localStorage.setItem(TOKEN_KEY, t); } catch
 // Same-origin by default; set window.LABDHI_API to point at a separate backend.
 const base = () => (window.LABDHI_API || '').replace(/\/$/, '');
 
+// The shell installs a real unlock screen over this; the prompt is only the
+// fallback if something asks for a token before the UI has booted.
+let askForToken = async () => {
+  const v = window.prompt('Access token for this desk:');
+  return v ? v.trim() : '';
+};
+export const setTokenPrompt = fn => { askForToken = fn; };
+
 async function call(path, opts = {}) {
   const token = getToken();
   const res = await fetch(base() + path, {
@@ -20,8 +28,8 @@ async function call(path, opts = {}) {
     body: opts.body ? JSON.stringify(opts.body) : undefined
   });
   if (res.status === 401) {
-    const entered = window.prompt('Access token for this desk:');
-    if (entered) { setToken(entered.trim()); return call(path, opts); }
+    const entered = await askForToken();
+    if (entered) { setToken(entered); return call(path, opts); }
     throw new Error('Access token required');
   }
   let data = null;

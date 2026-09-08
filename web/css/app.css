@@ -411,6 +411,18 @@ main{overflow:auto;padding:26px 24px 60px}
 .empty{padding:70px 20px;text-align:center;color:var(--ink-3)}
 .empty h3{color:var(--ink-2);font-weight:620;margin:0 0 8px;font-size:20px}
 
+.unlock{position:fixed;inset:0;z-index:200;display:grid;place-items:center;
+  background:var(--bg);padding:24px}
+.unlock-card{width:min(440px,100%);background:var(--surface);border:1px solid var(--line);
+  border-radius:var(--r);padding:30px;box-shadow:var(--shadow-lg);display:flex;
+  flex-direction:column;gap:14px}
+.unlock-title{font-size:24px;font-weight:700;letter-spacing:-.02em}
+.unlock-sub{font-size:15px;color:var(--ink-2);line-height:1.5}
+.unlock-card input{background:var(--bg);border:1px solid var(--line);border-radius:12px;
+  padding:15px 16px;font-size:17px;outline:none;font-family:var(--mono)}
+.unlock-card input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.unlock-card .confirm{width:100%}
+
 /* ---------------------------------------------------------- phone */
 /* Rules: the top bar stays one line, navigation moves to a thumb-reachable
    bottom bar, and every tap target stays at least 44px. The trade screen hides

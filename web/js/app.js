@@ -1,7 +1,7 @@
 // Shell: state, routing, keyboard. Every screen is a full page — nothing in
 // this app opens in a dialog, because a trade deserves the whole window.
 import { h, mount, $, toast } from './ui.js';
-import { api } from './api.js';
+import { api, setTokenPrompt } from './api.js';
 import { renderDesk, renderTicker } from './desk.js';
 import { renderFlow } from './flow.js';
 import { renderTape, renderPosition } from './tape.js';
@@ -83,6 +83,33 @@ window.addEventListener('keydown', e => {
       .catch(err => toast(err.message, { kind: 'err' }));
   }
 });
+
+// ---------------------------------------------------------------- unlock
+// A deployed desk is behind a shared token. Asking for it through a browser
+// prompt works but looks like a phishing box, so it gets a real screen.
+setTokenPrompt(() => new Promise(resolve => {
+  const input = h('input', {
+    type: 'password', placeholder: 'Paste your access token',
+    onkeydown: e => { if (e.key === 'Enter') submit(); }
+  });
+  const card = h('div', { class: 'unlock-card' },
+    h('div', { class: 'unlock-title' }, 'This desk is locked'),
+    h('div', { class: 'unlock-sub' },
+      'It is on a public URL, so the book is behind an access token. ' +
+      'Ask whoever set it up, or read LABDHI_TOKEN from the server settings.'),
+    input,
+    h('button', { class: 'confirm buy', onclick: () => submit() }, 'Unlock'));
+  const screen = h('div', { class: 'unlock' }, card);
+  document.body.appendChild(screen);
+  setTimeout(() => input.focus(), 50);
+
+  function submit() {
+    const value = input.value.trim();
+    if (!value) { input.focus(); return; }
+    screen.remove();
+    resolve(value);
+  }
+}));
 
 document.querySelectorAll('.nav button').forEach(b => b.onclick = () => go(b.dataset.route));
 $('#btn-buy').onclick = () => trade('buy');

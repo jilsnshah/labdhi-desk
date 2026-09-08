@@ -78,7 +78,7 @@ def create_deal(payload: Dict[str, Any]) -> Dict[str, Any]:
             transporter_id = catalog.upsert_party(conn, payload["transporter"], "transporter")
 
         ref = _next_ref(conn, side)
-        cur = conn.execute(
+        deal_id = conn.insert(
             """INSERT INTO deals
                (ref,side,status,party_id,sku_id,qty_g,rate_paise,plus_gst,deal_date,
                 transporter_id,freight_by,delivery_by,payment_terms,eway,remarks,
@@ -91,7 +91,6 @@ def create_deal(payload: Dict[str, Any]) -> Dict[str, Any]:
              payload.get("payment_terms"), payload.get("eway"), payload.get("remarks"),
              payload.get("policy") or db.settings().get("alloc_policy", "fifo"), db.now()),
         )
-        deal_id = int(cur.lastrowid)
         db.log(conn, "deal", deal_id, "create", "Drafted %s" % ref, {"side": side, "ref": ref})
 
         if confirm:
@@ -137,14 +136,13 @@ def _book(conn, deal_id: int, pins=None, policy=None, allow_short: bool = False)
 
 def _book_buy(conn, deal) -> None:
     label = "%s / %s" % (deal["ref"], _party_name(deal["party_id"]))
-    cur = conn.execute(
+    lot_id = conn.insert(
         """INSERT INTO lots(label,deal_id,sku_id,supplier_id,rate_paise,qty_g,
                             qty_allocated_g,status,booked_at)
            VALUES (?,?,?,?,?,?,0,'open',?)""",
         (label, deal["id"], deal["sku_id"], deal["party_id"],
          deal["rate_paise"], deal["qty_g"], db.now()),
     )
-    lot_id = int(cur.lastrowid)
     db.log(conn, "deal", deal["id"], "book",
            "Bought %s %s @ %s" % (fmt_qty(deal["qty_g"]), _sku_name(deal["sku_id"]),
                                   fmt_money(deal["rate_paise"])),

@@ -6,7 +6,6 @@ That is the case the whole material -> grade -> manufacturer tree exists for.
 """
 from __future__ import annotations
 
-import os
 import sys
 from datetime import datetime, timedelta
 
@@ -44,10 +43,7 @@ def day(offset: int) -> str:
 
 def run(reset: bool = False) -> None:
     if reset:
-        for suffix in ("", "-wal", "-shm"):
-            path = db.DB_PATH + suffix
-            if os.path.exists(path):
-                os.remove(path)
+        db.reset()
     db.init_db()
 
     rows = [("buy",) + r for r in BUYS] + [("sell",) + r for r in SELLS]

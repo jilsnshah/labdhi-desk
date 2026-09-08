@@ -31,7 +31,7 @@ def upsert_party(conn, name: str, role: Optional[str] = None, **fields) -> int:
     slug = db.slugify(name)
     row = q_party(slug)
     if row is None:
-        cur = conn.execute(
+        pid = conn.insert(
             "INSERT INTO parties(name,slug,is_supplier,is_customer,is_transporter,city,phone,notes,created_at)"
             " VALUES (?,?,?,?,?,?,?,?,?)",
             (name, slug,
@@ -40,7 +40,6 @@ def upsert_party(conn, name: str, role: Optional[str] = None, **fields) -> int:
              1 if role == "transporter" else 0,
              fields.get("city"), fields.get("phone"), fields.get("notes"), db.now()),
         )
-        pid = int(cur.lastrowid)
         db.log(conn, "party", pid, "create", "New party %s" % name, {"name": name, "role": role})
         return pid
 
@@ -117,12 +116,11 @@ def upsert_sku(conn, material: str = "", grade: str = "", manufacturer: str = ""
         return int(row["id"])
 
     display = display_name(material, grade, manufacturer, packing)
-    cur = conn.execute(
+    sid = conn.insert(
         "INSERT INTO skus(slug,display,material,grade,manufacturer,packing,created_at)"
         " VALUES (?,?,?,?,?,?,?)",
         (db.slugify(display), display, material, grade, manufacturer, packing, db.now()),
     )
-    sid = int(cur.lastrowid)
     register(conn, material, grade, manufacturer)
     db.log(conn, "sku", sid, "create", "New stock line %s" % display,
            {"material": material, "grade": grade, "manufacturer": manufacturer})
