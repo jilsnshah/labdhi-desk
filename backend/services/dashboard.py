@@ -90,7 +90,9 @@ def attention() -> List[Dict[str, Any]]:
            JOIN allocations a ON a.sale_deal_id=d.id AND a.active=1
            JOIN parties p ON p.id=d.party_id JOIN skus s ON s.id=d.sku_id
            WHERE d.side='sell' AND d.status='booked'
-           GROUP BY d.id HAVING m < 0 ORDER BY m ASC LIMIT 5"""
+           GROUP BY d.id, d.ref, p.name, s.display
+           HAVING SUM(a.qty_g * (a.sale_rate_paise - a.cost_paise)) < 0
+           ORDER BY m ASC LIMIT 5"""
     ):
         out.append({
             "level": "warn", "kind": "loss", "deal_id": r["id"],
@@ -141,7 +143,8 @@ def counterparties(limit: int = 12) -> List[Dict[str, Any]]:
                   COALESCE(SUM(CASE WHEN d.side='sell' AND d.status='booked' THEN d.qty_g END),0) AS sold_g,
                   COUNT(d.id) AS deals, MAX(d.deal_date) AS last_deal
            FROM parties p LEFT JOIN deals d ON d.party_id=p.id
-           GROUP BY p.id HAVING deals > 0
+           GROUP BY p.id, p.name, p.is_supplier, p.is_customer
+           HAVING COUNT(d.id) > 0
            ORDER BY last_deal DESC, deals DESC LIMIT ?""", (limit,))
     out = []
     for r in rows:

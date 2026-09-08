@@ -69,7 +69,7 @@ def run(reset: bool = False) -> None:
             "eway": "%s to buyer" % party if side == "buy" else None,
             "confirm": True,
         })
-    print("Seeded %d deals into %s" % (len(rows), db.DB_PATH))
+    print("Seeded %d deals into %s" % (len(rows), "Postgres" if db.IS_PG else db.DB_PATH))
 
 
 if __name__ == "__main__":

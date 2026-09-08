@@ -30,11 +30,10 @@ def sell(party, qty_g, rate_paise, date, policy="fifo", allow_short=False, pins=
 
 class Base(unittest.TestCase):
     def setUp(self):
-        for suffix in ("", "-wal", "-shm"):
-            p = db.DB_PATH + suffix
-            if os.path.exists(p):
-                os.remove(p)
-        db._local.__dict__.clear()
+        # db.reset() knows how to wipe whichever backend is configured. Deleting
+        # the SQLite file directly would silently do nothing against Postgres and
+        # leave every test running on the previous one's data.
+        db.reset()
         db.init_db()
 
     def sku_id(self, material="PVC", grade="HS1000", manufacturer="Chemplast Sanmar"):

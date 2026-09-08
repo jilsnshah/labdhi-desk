@@ -56,12 +56,40 @@ def to_pg(sql: str) -> str:
 
 
 def schema_for_pg(sql: str) -> str:
+    """SQLite's INTEGER is whatever it needs to be; Postgres' is 32-bit.
+
+    Quantities are grams and rates are paise, so 48 MT at Rs 103 is already
+    ~5e11 once multiplied - far past a 32-bit column. SQLite widened silently,
+    Postgres raises. Everything numeric therefore becomes BIGINT.
+    """
     out = []
     for line in sql.splitlines():
         if line.strip().upper().startswith("PRAGMA"):
             continue
-        out.append(line.replace("INTEGER PRIMARY KEY", "BIGSERIAL PRIMARY KEY"))
+        line = line.replace("INTEGER PRIMARY KEY", "BIGSERIAL PRIMARY KEY")
+        line = re.sub(r"\bINTEGER\b(?! PRIMARY KEY)", "BIGINT", line)
+        out.append(line)
     return "\n".join(out)
+
+
+def _int_rows(cursor):
+    """Postgres returns SUM(bigint) as numeric, which arrives as Decimal.
+
+    Every number in this system is an exact integer - grams, paise - so a
+    Decimal leaking through would break arithmetic downstream and fail JSON
+    encoding at the edge. They are converted back here, once, at the boundary.
+    """
+    from decimal import Decimal
+    from psycopg.rows import dict_row
+    base = dict_row(cursor)
+
+    def make(values):
+        row = base(values)
+        for key, value in row.items():
+            if isinstance(value, Decimal):
+                row[key] = int(value) if value == value.to_integral_value() else float(value)
+        return row
+    return make
 
 
 class Conn:
@@ -101,8 +129,7 @@ def connect() -> Conn:
 
     if IS_PG:
         import psycopg
-        from psycopg.rows import dict_row
-        raw = psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
+        raw = psycopg.connect(DATABASE_URL, autocommit=True, row_factory=_int_rows)
     else:
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         raw = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
@@ -140,6 +167,7 @@ def reset() -> None:
         conn = connect()
         for table in TABLES:
             conn.execute("DROP TABLE IF EXISTS %s CASCADE" % table)
+        conn.raw.close()
         _local.__dict__.clear()
         return
     for suffix in ("", "-wal", "-shm"):

@@ -229,7 +229,8 @@ def by_supplier(sku_id: int) -> List[Dict[str, Any]]:
                   SUM(l.qty_g) AS bought_g
            FROM lots l JOIN parties p ON p.id=l.supplier_id
            WHERE l.sku_id=? AND l.status='open'
-           GROUP BY p.id HAVING stock_g > 0
+           GROUP BY p.id, p.name
+           HAVING SUM(l.qty_g - l.qty_allocated_g) > 0
            ORDER BY stock_g DESC""",
         (sku_id,),
     )
