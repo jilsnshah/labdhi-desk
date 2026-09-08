@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f4f4f1">
+<title>Labdhi Desk</title>
+<link rel="stylesheet" href="/css/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📈</text></svg>">
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <div class="brand">
+      <i class="dot"></i>
+      <div><span id="company">Trading Desk</span><small>polymer book</small></div>
+    </div>
+    <div class="ticker" id="ticker"></div>
+    <nav class="nav">
+      <button data-route="desk" class="on">Desk</button>
+      <button data-route="flow">Flow</button>
+      <button data-route="tape">Tape</button>
+      <button data-route="setup">Setup</button>
+    </nav>
+    <div class="actions">
+      <button class="big-btn buy" id="btn-buy">Buy <kbd>B</kbd></button>
+      <button class="big-btn sell" id="btn-sell">Sell <kbd>S</kbd></button>
+    </div>
+  </header>
+  <main id="main"></main>
+</div>
+<div id="toasts"></div>
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

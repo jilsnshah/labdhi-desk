@@ -1,0 +1,52 @@
+"""Access control for a deployed desk.
+
+Locally there is nothing to protect: the server binds to 127.0.0.1 and only the
+trader can reach it. The moment it is on a public URL that stops being true —
+every endpoint here can read the whole book, book deals and cancel them, and
+none of that should be one guessed hostname away.
+
+So: if LABDHI_TOKEN is set, every /api call must carry it. If it is not set,
+the app refuses to serve anything but localhost, rather than silently running
+wide open somewhere public.
+"""
+from __future__ import annotations
+
+import hmac
+import os
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+HEADER = "x-labdhi-token"
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "testserver"}
+
+
+def token() -> str:
+    return os.environ.get("LABDHI_TOKEN", "").strip()
+
+
+def _is_local(request: Request) -> bool:
+    host = (request.client.host if request.client else "") or ""
+    return host in LOCAL_HOSTS
+
+
+async def guard(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/api/") or path == "/api/health":
+        return await call_next(request)
+
+    secret = token()
+    if not secret:
+        # No token configured: fine on a laptop, never on the open internet.
+        if _is_local(request):
+            return await call_next(request)
+        return JSONResponse(
+            status_code=503,
+            content={"error": "This deployment has no LABDHI_TOKEN set, so it will not "
+                              "serve remote requests. Set one and restart."},
+        )
+
+    given = request.headers.get(HEADER, "")
+    if not hmac.compare_digest(given, secret):
+        return JSONResponse(status_code=401, content={"error": "Bad or missing access token"})
+    return await call_next(request)

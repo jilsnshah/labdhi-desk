@@ -1,0 +1,33 @@
+# Render blueprint for the backend.
+#
+# NOTE ON THE PLAN: this app keeps its book in SQLite on disk. Render's free
+# instances have an ephemeral filesystem and sleep when idle, which means the
+# whole trading book is erased on every deploy and every wake-up. That is fine
+# for a demo and unacceptable for real trades, so this blueprint asks for a
+# paid instance with a persistent disk. To run it as a throwaway demo instead,
+# set `plan: free` and delete the `disk:` block — and expect to lose the data.
+services:
+  - type: web
+    name: labdhi-api
+    runtime: python
+    plan: starter
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: LABDHI_DB
+        value: /var/data/labdhi.db
+      - key: LABDHI_TOKEN          # every API call must present this
+        generateValue: true
+      - key: LABDHI_ORIGINS        # set to the Vercel URL once it exists
+        sync: false
+      - key: LABDHI_SEED           # "1" fills an empty book with demo deals
+        value: "0"
+    disk:
+      name: labdhi-data
+      mountPath: /var/data
+      sizeGB: 1
