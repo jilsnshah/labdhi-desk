@@ -32,13 +32,13 @@ export async function renderFlow(root, ctx) {
   const [posPage, graph] = await Promise.all([
     api.positions({ limit: 40, q: ctx.flowQuery || '' }),
     api.graph({
-      sku_id: ctx.skuFilter || undefined,
+      product_id: ctx.productFilter || undefined,
       date_from: ctx.flowFrom || undefined,
       date_to: ctx.flowTo || undefined,
       limit: 60
     })
   ]);
-  const positions = posPage.positions;
+  const positions = posPage.items;
   const view = h('div', { class: 'view' });
   mount(root, view);
 
@@ -77,16 +77,16 @@ export async function renderFlow(root, ctx) {
 
     h('div', { class: 'chips', style: { marginBottom: '16px' } },
       h('button', {
-        class: 'chip' + (ctx.skuFilter ? '' : ' on'),
-        onclick: () => { ctx.skuFilter = null; reload(); }
-      }, 'All materials'),
+        class: 'chip' + (ctx.productFilter ? '' : ' on'),
+        onclick: () => { ctx.productFilter = null; reload(); }
+      }, 'All products'),
       ...positions.map(p => h('button', {
-        class: 'chip' + (ctx.skuFilter === p.sku_id ? ' on' : ''),
-        onclick: () => { ctx.skuFilter = p.sku_id; reload(); }
-      }, p.material, h('small', {}, f.qty(p.stock_g, { short: true })))),
-      posPage.matched > positions.length
+        class: 'chip' + (ctx.productFilter === p.product_id ? ' on' : ''),
+        onclick: () => { ctx.productFilter = p.product_id; reload(); }
+      }, p.product, h('small', {}, f.qty(p.stock_g, { short: true })))),
+      posPage.total > positions.length
         ? h('span', { class: 'dim', style: { alignSelf: 'center', fontSize: '14px' } },
-            `+${posPage.matched - positions.length} more — use the filter`)
+            `+${posPage.total - positions.length} more — use the filter`)
         : null),
 
     graph.nodes.length

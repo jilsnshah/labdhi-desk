@@ -31,8 +31,8 @@ import re
 import sys
 from typing import Any, Dict, List, Tuple
 
-from . import db
-from .services import catalog
+from . import db, gst
+from .services import parties as party_svc
 
 HEADER = "Sl No."
 DEFAULT_FILES = ["labdhi exim ledger address.xlsx", "om ledger address.xlsx"]
@@ -102,8 +102,8 @@ def read_rows(path: str) -> Tuple[List[Dict[str, str]], int]:
             continue
         parties.append({
             "name": _clean(r[1]), "address": _clean(r[2]), "state": _clean(r[3]),
-            "gstin": catalog.normalize_gstin(_clean(r[6])),
-            "pan": catalog.normalize_gstin(_clean(r[7])),
+            "gstin": gst.normalize(_clean(r[6])),
+            "pan": gst.normalize(_clean(r[7])),
         })
     return parties, continuation
 
@@ -129,13 +129,15 @@ def plan(paths: List[str]) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
             address = r["address"]
             if r["state"] and r["state"].lower() not in address.lower():
                 address = "%s, %s" % (address, r["state"]) if address else r["state"]
-            rec = {"name": r["name"], "address": address, "gstin": r["gstin"], "pan": r["pan"]}
+            # The state is kept as a record reference; a GSTIN overrides it anyway.
+            rec = {"name": r["name"], "address": address, "gstin": r["gstin"], "pan": r["pan"],
+                   "state_code": gst.state_code_for_name(r["state"])}
 
             if rec["gstin"]:
                 cur = by_gstin.get(rec["gstin"])
                 if cur is None:
                     by_gstin[rec["gstin"]] = rec
-                    problem = catalog.gstin_problem(rec["gstin"])
+                    problem = gst.problem(rec["gstin"])
                     if problem:
                         report["bad_gstin"].append((rec["name"], rec["gstin"], problem))
                     continue
@@ -187,9 +189,10 @@ def apply(records: List[Dict[str, str]]) -> Tuple[int, int]:
     with db.tx() as conn:
         before = db.scalar("SELECT COUNT(*) FROM parties")
         for rec in records:
-            catalog.save_party(conn, name=rec["name"], address=rec["address"],
-                               gstin=rec["gstin"], pan=rec["pan"],
-                               strict=False, merge=True, quiet=True)
+            party_svc.save_party(conn, name=rec["name"], address=rec["address"],
+                                 gstin=rec["gstin"], pan=rec["pan"],
+                                 state_code=rec.get("state_code", ""),
+                                 strict=False, merge=True, quiet=True)
         after = db.scalar("SELECT COUNT(*) FROM parties")
         created = after - before
         updated = len(records) - created

@@ -120,6 +120,11 @@ export function searchBar(placeholder, onChange, { value = '', delay = 200 } = {
   return bar;
 }
 
+export function debounce(fn, ms = 220) {
+  let t = null;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
 // A "Load more" footer that knows how much is left.
 export function moreBar(onMore) {
   const count = h('span', { class: 'more-count' }, '');

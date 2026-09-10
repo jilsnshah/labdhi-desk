@@ -64,7 +64,7 @@ export function makeFilters({ fields, onChange }) {
         data: { k: fld.key }, disabled: disabled || undefined,
         onchange: e => set(fld.key, e.target.value)
       },
-        h('option', { value: '' }, disabled ? `pick a ${fld.needs} first` : fld.any || 'Any'),
+        h('option', { value: '' }, disabled ? `pick a ${fld.needsLabel || fld.needs} first` : fld.any || 'Any'),
         ...opts.map(o => h('option', {
           value: o.value, selected: String(state[o.key || fld.key] ?? state[fld.key]) === String(o.value) || undefined
         }, o.label))));
@@ -100,6 +100,7 @@ export function makeFilters({ fields, onChange }) {
   return {
     el, state,
     values: active,
+    set,
     setOptions(key, list) { options[key] = list; paint(); },
     get(key) { return state[key]; }
   };

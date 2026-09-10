@@ -62,3 +62,41 @@ export function ago(iso) {
 }
 
 export const initials = name => (name || '?').split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+
+// A quantity as the bare MT figure a column shows: 12, 12.5, 0.25.
+export const mt = g => ((g || 0) / TON).toLocaleString('en-IN', { maximumFractionDigits: 3 });
+
+// "2.5" MT typed into a form -> grams, or null when it is not a positive number.
+export function fromMt(text) {
+  const v = parseFloat(String(text || '').replace(/[^0-9.]/g, ''));
+  return isFinite(v) && v > 0 ? Math.round(v * TON) : null;
+}
+
+export function today() {
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+export function addDays(iso, days) {
+  const d = new Date((iso || today()) + 'T00:00:00');
+  d.setDate(d.getDate() + days);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// The same GSTIN rule the server applies, run as it is typed: format, then the
+// check character over the first fourteen.
+const B36 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+export function gstinProblem(g) {
+  if (!g) return null;
+  if (!/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(g)) return 'is not in GSTIN format';
+  let total = 0;
+  for (let i = 0; i < 14; i++) {
+    const v = B36.indexOf(g[i]) * (i % 2 ? 2 : 1);
+    total += Math.floor(v / 36) + (v % 36);
+  }
+  return B36[(36 - (total % 36)) % 36] === g[14] ? null : 'has a wrong check character — likely a typo';
+}
+
+export const sideLabel = s => (s === 'sell' ? 'SELL' : 'BUY');
+export const statusLabel = s => ({ booked: 'Booked', cancelled: 'Cancelled', draft: 'Draft' }[s] || s);

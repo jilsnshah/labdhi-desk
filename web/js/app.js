@@ -1,25 +1,27 @@
-// Shell: state, routing, keyboard. Every screen is a full page — nothing in
-// this app opens in a dialog, because a trade deserves the whole window.
+// Shell: state, routing, keyboard. Every screen is a full page — a trade
+// deserves the whole window. The only overlays are the record forms and
+// pickers, which return to exactly where the trader was.
 import { h, mount, $, toast } from './ui.js';
 import { api, setTokenPrompt, onSlow } from './api.js';
 import { renderDesk, renderTicker } from './desk.js';
 import { renderFlow } from './flow.js';
 import { renderTape, renderPosition } from './tape.js';
+import { renderStock } from './stock.js';
 import { startTrade, renderTrade } from './trade.js';
 import { renderSetup } from './setup.js';
 import {
-  mountShell, renderMobileDesk, renderMobileFlow, renderMobileTape,
-  renderMobilePosition, renderMobileSetup, startTicket, syncTabs, paintHeader
+  mountShell, renderMobileDesk, renderMobileFlow, renderMobileTape, renderMobileStock,
+  renderMobilePosition, renderMobileSetup, syncTabs, paintHeader
 } from './mobile.js';
+import { startTicket } from './mticket.js';
 
 // A phone is a different product, not a narrower window: it gets its own shell
-// and its own buy/sell flow. The breakpoint is watched rather than read once,
-// so rotating a tablet swaps cleanly instead of stranding a half-built screen.
+// and its own buy/sell flow. The breakpoint is watched rather than read once.
 const phone = window.matchMedia('(max-width: 760px)');
 const isPhone = () => phone.matches;
 
 const ctx = {
-  boot: null, desk: null, route: 'desk', param: null, skuFilter: null,
+  boot: null, summary: null, route: 'desk', param: null, productFilter: null,
   go, refresh, openPosition, openDeal, sell
 };
 
@@ -29,34 +31,30 @@ async function boot() {
   document.body.classList.toggle('phone', isPhone());
   if (isPhone()) mountShell(ctx);
   ctx.boot = await api.bootstrap();
-  ctx.desk = ctx.boot.desk;
+  ctx.summary = ctx.boot.summary;
   $('#company').textContent = ctx.boot.settings.company_name || 'Trading Desk';
-  renderTicker(tickerEl, ctx.desk);
-  if (isPhone()) paintHeader(ctx.desk);
+  renderTicker(tickerEl, ctx.summary);
+  if (isPhone()) paintHeader(ctx.summary);
   paint();
 }
 
 phone.addEventListener('change', () => {
   document.body.classList.toggle('phone', isPhone());
   if (isPhone() && !document.querySelector('.mhead')) mountShell(ctx);
-  if (isPhone() && ctx.desk) paintHeader(ctx.desk);
+  if (isPhone() && ctx.summary) paintHeader(ctx.summary);
   paint();
 });
 
 async function refresh() {
-  ctx.boot = await api.bootstrap();
-  ctx.desk = ctx.boot.desk;
-  renderTicker(tickerEl, ctx.desk);
-  if (isPhone()) paintHeader(ctx.desk);
-  if (ctx.route !== 'trade') paint();
+  ctx.summary = await api.summary();
+  renderTicker(tickerEl, ctx.summary);
+  if (isPhone()) paintHeader(ctx.summary);
+  if (ctx.route === 'desk') paint();
 }
 
 function go(route, param = null) {
   ctx.route = route; ctx.param = param;
-  // On a phone the bottom nav and the Book bar would fight for the same strip,
-  // so the trade screen owns it alone.
   document.body.classList.toggle('trading', route === 'trade');
-  document.body.classList.toggle('on-desk', route === 'desk');
   for (const b of document.querySelectorAll('.nav button')) b.classList.toggle('on', b.dataset.route === route);
   if (isPhone()) syncTabs();
   main.scrollTop = 0;
@@ -64,41 +62,35 @@ function go(route, param = null) {
 }
 
 function paint() {
-  // Set here rather than in go(), which the first paint never goes through.
   document.body.classList.toggle('on-desk', ctx.route === 'desk');
-  if (ctx.route === 'desk') {
-    if (isPhone()) renderMobileDesk(main, ctx.desk);
-    else renderDesk(main, ctx.desk, ctx);
-  }
-  else if (ctx.route === 'flow') (isPhone() ? renderMobileFlow : renderFlow)(main, ctx);
-  else if (ctx.route === 'tape') (isPhone() ? renderMobileTape : renderTape)(main, ctx);
-  else if (ctx.route === 'position') {
-    if (isPhone()) renderMobilePosition(main, ctx.param, ctx);
-    else renderPosition(main, ctx.param, ctx);
-  }
-  else if (ctx.route === 'trade') renderTrade(main);
-  else if (ctx.route === 'setup') (isPhone() ? renderMobileSetup : renderSetup)(main, ctx);
+  const P = isPhone();
+  const r = ctx.route;
+  if (r === 'desk') (P ? renderMobileDesk : renderDesk)(main, ctx.summary, ctx);
+  else if (r === 'stock') (P ? renderMobileStock : renderStock)(main, ctx);
+  else if (r === 'flow') (P ? renderMobileFlow : renderFlow)(main, ctx);
+  else if (r === 'tape') (P ? renderMobileTape : renderTape)(main, ctx);
+  else if (r === 'position') (P ? renderMobilePosition : renderPosition)(main, ctx.param, ctx);
+  else if (r === 'trade') renderTrade(main);
+  else if (r === 'setup') (P ? renderMobileSetup : renderSetup)(main, ctx);
 }
 
+// opts.product: {id, display} to open the ticket on a product already chosen
 function trade(side, opts = {}) {
-  if (isPhone()) {
-    startTicket(side, opts.sku ? { sku_id: opts.sku.id, material: opts.sku.display } : {});
-    return;
-  }
+  if (isPhone()) { startTicket(side, opts, ctx); return; }
   startTrade(side, opts, ctx);
   go('trade');
 }
 
-function openPosition(skuId) { go('position', skuId); }
+function openPosition(productId) { go('position', productId); }
 
 async function openDeal(dealId) {
   const d = await api.deal(dealId);
   go('tape');
-  toast(`${d.ref} · ${d.side.toUpperCase()} ${d.material} with ${d.party_name}`);
+  toast(`${d.ref} · ${d.side.toUpperCase()} ${d.product} with ${d.party_name}`);
 }
 
 function sell(pos) {
-  trade('sell', { sku: { id: pos.sku_id, display: pos.material } });
+  trade('sell', { product: { id: pos.product_id, display: pos.product } });
 }
 
 ctx.trade = trade;
@@ -106,17 +98,18 @@ ctx.trade = trade;
 // ---------------------------------------------------------------- keyboard
 window.addEventListener('keydown', e => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
-  if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (typing || e.metaKey || e.ctrlKey || e.altKey || document.querySelector('.modal')) return;
   const k = e.key.toLowerCase();
   if (k === 'b') { e.preventDefault(); trade('buy'); }
   else if (k === 's') { e.preventDefault(); trade('sell'); }
   else if (k === 'escape' && ctx.route === 'trade') go('desk');
   else if (k === '1') go('desk');
-  else if (k === '2') go('flow');
-  else if (k === '3') go('tape');
-  else if (k === '4') go('setup');
+  else if (k === '2') go('stock');
+  else if (k === '3') go('flow');
+  else if (k === '4') go('tape');
+  else if (k === '5') go('setup');
   else if (k === 'u') {
-    api.undo().then(r => { toast('Reversed ' + (r.deal ? r.deal.ref : '')); refresh(); })
+    api.undo().then(() => { toast('Reversed the last action'); refresh(); if (ctx.route !== 'trade') paint(); })
       .catch(err => toast(err.message, { kind: 'err' }));
   }
 });
@@ -132,8 +125,6 @@ document.body.appendChild(waking);
 onSlow(on => { waking.hidden = !on; });
 
 // ---------------------------------------------------------------- unlock
-// A deployed desk is behind a shared token. Asking for it through a browser
-// prompt works but looks like a phishing box, so it gets a real screen.
 setTokenPrompt(() => new Promise(resolve => {
   const input = h('input', {
     type: 'password', placeholder: 'Password', autocomplete: 'current-password',

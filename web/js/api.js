@@ -1,7 +1,11 @@
 // Every call funnels through here so errors surface the same way everywhere.
-// A deployed desk is protected by a shared token. It lives in localStorage on
-// the device, is sent as a header, and is asked for once when the server says
-// the request was not authorised.
+// A deployed desk is protected by a shared password. It lives in localStorage
+// on the device, is sent as a header, and is asked for once when the server
+// says the request was not authorised.
+//
+// Every list endpoint answers one shape - {items, total, limit, offset,
+// has_more} - and every master record is saved by POST with or without an id
+// and comes back whole.
 const TOKEN_KEY = 'labdhi.token';
 export const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; } };
 export const setToken = t => { try { localStorage.setItem(TOKEN_KEY, t); } catch (_) {} };
@@ -9,18 +13,15 @@ export const setToken = t => { try { localStorage.setItem(TOKEN_KEY, t); } catch
 // Same-origin by default; set window.LABDHI_API to point at a separate backend.
 const base = () => (window.LABDHI_API || '').replace(/\/$/, '');
 
-// The shell installs a real unlock screen over this; the prompt is only the
-// fallback if something asks for a token before the UI has booted.
 let askForToken = async () => {
-  const v = window.prompt('Access token for this desk:');
+  const v = window.prompt('Password for this desk:');
   return v ? v.trim() : '';
 };
 export const setTokenPrompt = fn => { askForToken = fn; };
 
 // Render's free tier stops the instance after ~15 minutes idle, and the next
-// request pays ~50 seconds to boot it. Without a word on screen that reads as
-// a broken app, so any call that takes more than a moment announces itself and
-// a cold-start failure is retried rather than surfaced as an error.
+// request pays ~50 seconds to boot it. Any call that takes more than a moment
+// announces itself, and a cold-start failure is retried rather than surfaced.
 let inFlight = 0;
 const slow = new EventTarget();
 export const onSlow = fn => slow.addEventListener('slow', e => fn(e.detail));
@@ -28,8 +29,7 @@ export const onSlow = fn => slow.addEventListener('slow', e => fn(e.detail));
 async function call(path, opts = {}, attempt = 0) {
   const token = getToken();
   inFlight++;
-  const timer = setTimeout(() => slow.dispatchEvent(
-    new CustomEvent('slow', { detail: true })), 2500);
+  const timer = setTimeout(() => slow.dispatchEvent(new CustomEvent('slow', { detail: true })), 2500);
   const done = () => {
     clearTimeout(timer);
     if (--inFlight <= 0) slow.dispatchEvent(new CustomEvent('slow', { detail: false }));
@@ -38,16 +38,12 @@ async function call(path, opts = {}, attempt = 0) {
   let res;
   try {
     res = await fetch(base() + path, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { 'X-Labdhi-Token': token } : {})
-    },
+      headers: { 'Content-Type': 'application/json', ...(token ? { 'X-Labdhi-Token': token } : {}) },
       ...opts,
       body: opts.body ? JSON.stringify(opts.body) : undefined
     });
   } catch (err) {
     done();
-    // A dropped connection while the instance boots is not a real failure.
     if (attempt < 3) {
       await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
       return call(path, opts, attempt + 1);
@@ -63,7 +59,7 @@ async function call(path, opts = {}, attempt = 0) {
     done();
     const entered = await askForToken();
     if (entered) { setToken(entered); return call(path, opts); }
-    throw new Error('Access token required');
+    throw new Error('Password required');
   }
   let data = null;
   try { data = await res.json(); } catch (_) { data = null; }
@@ -76,42 +72,65 @@ async function call(path, opts = {}, attempt = 0) {
 }
 
 const qs = o => Object.entries(o || {})
-  .filter(([, v]) => v !== undefined && v !== null && v !== '')
-  .map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+  .filter(([, v]) => v !== undefined && v !== null && v !== '' && v !== false)
+  .map(([k, v]) => `${k}=${encodeURIComponent(v === true ? 1 : v)}`).join('&');
+const get = (path, params) => call(path + (params && qs(params) ? '?' + qs(params) : ''));
+const post = (path, body) => call(path, { method: 'POST', body: body || {} });
 
 export const api = {
-  bootstrap: () => call('/api/bootstrap'),
-  desk: (params) => call('/api/desk?' + qs(params)),
-  tape: (params) => call('/api/tape?' + qs(params)),
-  positions: (params) => call('/api/positions?' + qs(params)),
-  position: id => call(`/api/positions/${id}`),
-  graph: (params) => call('/api/graph?' + qs(params)),
-  trace: (kind, id) => call(`/api/trace/${kind}/${id}`),
-  parties: (q, role) => call('/api/search/parties?' + qs({ q, role })),
-  materials: (q, in_stock) => call('/api/search/materials?' + qs({ q, in_stock })),
-  catalog: (level, material, grade, in_stock) =>
-    call('/api/catalog/options?' + qs({ level, material, grade, in_stock })),
-  resolveSku: (material, grade, manufacturer) =>
-    call('/api/catalog/resolve?' + qs({ material, grade, manufacturer })),
-  catalogTree: () => call('/api/catalog/tree'),
-  partyList: q => call('/api/parties' + (q ? '?q=' + encodeURIComponent(q) : '')),
-  partySave: body => call('/api/parties', { method: 'POST', body }),
-  partyRemove: id => call(`/api/parties/${id}/remove`, { method: 'POST' }),
-  addCatalog: body => call('/api/catalog/entry', { method: 'POST', body }),
-  removeCatalog: body => call('/api/catalog/remove', { method: 'POST', body }),
-  lots: (skuId, warehouse) => call(`/api/lots/${skuId}?` + qs({ warehouse })),
-  saudaNext: date => call('/api/sauda/next?' + qs({ date })),
-  warehouses: () => call('/api/warehouses'),
-  addWarehouse: (name, location) => call('/api/warehouses', { method: 'POST', body: { name, location } }),
-  saveWarehouse: body => call('/api/warehouses', { method: 'POST', body }),
-  removeWarehouse: name => call('/api/warehouses/remove', { method: 'POST', body: { name } }),
-  deals: params => call('/api/deals?' + qs(params)),
-  deal: id => call(`/api/deals/${id}`),
-  previewSell: body => call('/api/preview/sell', { method: 'POST', body }),
-  createDeal: body => call('/api/deals', { method: 'POST', body }),
-  reallocate: (id, body) => call(`/api/deals/${id}/reallocate`, { method: 'POST', body }),
-  cancel: id => call(`/api/deals/${id}/cancel`, { method: 'POST' }),
-  undo: () => call('/api/undo', { method: 'POST' }),
-  setMark: (skuId, rate_paise) => call(`/api/marks/${skuId}`, { method: 'POST', body: { rate_paise } }),
-  settings: body => call('/api/settings', { method: 'POST', body })
+  bootstrap: () => get('/api/bootstrap'),
+  summary: () => get('/api/summary'),
+
+  // master records
+  parties: p => get('/api/parties', p),
+  party: id => get(`/api/parties/${id}`),
+  partySave: body => post('/api/parties', body),
+  partyRemove: id => post(`/api/parties/${id}/remove`),
+  gstin: g => get(`/api/gstin/${encodeURIComponent(g)}`),
+  states: p => get('/api/states', p),
+
+  warehouses: p => get('/api/warehouses', p),
+  warehouse: id => get(`/api/warehouses/${id}`),
+  warehouseSave: body => post('/api/warehouses', body),
+  warehouseRemove: id => post(`/api/warehouses/${id}/remove`),
+
+  materials: p => get('/api/materials', p),
+  materialSave: body => post('/api/materials', body),
+  materialRemove: id => post(`/api/materials/${id}/remove`),
+  grades: p => get('/api/grades', p),
+  gradeSave: body => post('/api/grades', body),
+  gradeRemove: id => post(`/api/grades/${id}/remove`),
+  manufacturers: p => get('/api/manufacturers', p),
+  manufacturerSave: body => post('/api/manufacturers', body),
+  manufacturerRemove: id => post(`/api/manufacturers/${id}/remove`),
+  products: p => get('/api/products', p),
+  product: id => get(`/api/products/${id}`),
+  productSave: body => post('/api/products', body),
+  productRemove: id => post(`/api/products/${id}/remove`),
+
+  // stock
+  positions: p => get('/api/positions', p),
+  position: id => get(`/api/positions/${id}`),
+  stock: p => get('/api/stock', p),
+  lots: (product_id, warehouse_id) => get('/api/stock/lots', { product_id, warehouse_id }),
+  moves: p => get('/api/stock/moves', p),
+  transfer: body => post('/api/stock/transfer', body),
+  adjust: body => post('/api/stock/adjust', body),
+  cancelMove: id => post(`/api/stock/moves/${id}/cancel`),
+  graph: p => get('/api/graph', p),
+  trace: (kind, id) => get(`/api/trace/${kind}/${id}`),
+
+  // deals
+  deals: p => get('/api/deals', p),
+  deal: id => get(`/api/deals/${id}`),
+  createDeal: body => post('/api/deals', body),
+  previewSell: body => post('/api/preview/sell', body),
+  reallocate: (id, body) => post(`/api/deals/${id}/reallocate`, body),
+  cancel: id => post(`/api/deals/${id}/cancel`),
+  saudaNext: date => get('/api/sauda/next', { date }),
+  counterparties: p => get('/api/counterparties', p),
+  undo: () => post('/api/undo'),
+  events: p => get('/api/events', p),
+  setMark: (productId, rate_paise) => post(`/api/marks/${productId}`, { rate_paise }),
+  settings: body => post('/api/settings', body)
 };

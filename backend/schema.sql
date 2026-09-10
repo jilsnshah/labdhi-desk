@@ -1,141 +1,159 @@
+-- Labdhi Desk - the book, relationally.
+--
+-- Written in SQLite's dialect; db.schema_for_pg() adapts it for Postgres.
+--
+-- Two kinds of table, and the rule between them:
+--
+--   MASTER DATA  states, parties, warehouses, materials, grades, manufacturers,
+--                products. Each thing exists once, has an id, and is edited in
+--                one place (Setup, or an "Add new" form inside a ticket).
+--
+--   TRANSACTIONS deals, lots, allocations, stock_moves. These only ever point
+--                at master data by id. A deal never carries a party's name, a
+--                warehouse's name or a material's name as text - rename any of
+--                them and every deal, lot and report follows at once.
+--
+-- Quantities are integer grams, money is integer paise, rates are paise per kg.
+
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
--- ---------------------------------------------------------------- settings
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
 
--- ---------------------------------------------------------------- parties
--- One table. A firm can be supplier AND customer AND transporter.
+-- ================================================================ master data
+
+-- GST state codes: the first two digits of every GSTIN. Seeded, read-only.
+CREATE TABLE IF NOT EXISTS states (
+  code TEXT PRIMARY KEY,
+  name TEXT NOT NULL
+);
+
+-- A counterparty. There is no buyer/seller split: the same firm is on either
+-- side of a deal from one week to the next, and a transporter is a party too.
+-- Identity is the GSTIN when there is one (two branches of one firm are two
+-- GSTINs, so two parties); otherwise the name.
 CREATE TABLE IF NOT EXISTS parties (
-  id             INTEGER PRIMARY KEY,
-  name           TEXT NOT NULL,
-  slug           TEXT NOT NULL UNIQUE,
-  is_supplier    INTEGER NOT NULL DEFAULT 0,
-  is_customer    INTEGER NOT NULL DEFAULT 0,
-  is_transporter INTEGER NOT NULL DEFAULT 0,
-  city           TEXT,
-  phone          TEXT,
-  address        TEXT,
-  gstin          TEXT,          -- unique when present; see db.migrate for the index
-  pan            TEXT,          -- derived from GSTIN when there is one
-  notes          TEXT,
-  created_at     TEXT NOT NULL
+  id          INTEGER PRIMARY KEY,
+  name        TEXT NOT NULL,
+  slug        TEXT NOT NULL UNIQUE,
+  gstin       TEXT UNIQUE,
+  pan         TEXT,                     -- read off the GSTIN when there is one
+  state_code  TEXT REFERENCES states(code),
+  phone       TEXT,
+  address     TEXT,
+  notes       TEXT,
+  created_at  TEXT NOT NULL
 );
 
--- ---------------------------------------------------------------- skus
--- The tradeable atom, and the unit inventory is kept in:
---
---     material  ->  grade  ->  manufacturer
---     PVC           HS1000     Chemplast Sanmar
---
--- All three together are the identity. PVC S65 from Reliance and PVC S65 from
--- DCW are different stock at different prices to different buyers, so they are
--- different rows here and never pool into one position.
-CREATE TABLE IF NOT EXISTS skus (
-  id           INTEGER PRIMARY KEY,
-  slug         TEXT NOT NULL UNIQUE,
-  display      TEXT NOT NULL,
-  material     TEXT NOT NULL,
-  grade        TEXT NOT NULL,
-  manufacturer TEXT NOT NULL DEFAULT '',
-  packing      TEXT,
-  created_at   TEXT NOT NULL,
-  UNIQUE (material, grade, manufacturer)
-);
-CREATE INDEX IF NOT EXISTS ix_skus_tree ON skus(material, grade, manufacturer);
-
--- ---------------------------------------------------------------- catalogue
--- The master tree, maintained from the Setup screen. A row here can exist with
--- no stock and no deals behind it, which is the point: the trader registers the
--- grades and manufacturers he deals in once, and the ticket then offers them as
--- a closed list instead of a free-text box that fragments the same maker into
--- "Reliance", "reliance " and "RIL".
-CREATE TABLE IF NOT EXISTS catalog_materials (
-  name       TEXT PRIMARY KEY,
-  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS catalog_grades (
-  material   TEXT NOT NULL,
-  grade      TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (material, grade)
-);
-CREATE TABLE IF NOT EXISTS catalog_makers (
-  material     TEXT NOT NULL,
-  grade        TEXT NOT NULL,
-  manufacturer TEXT NOT NULL,
-  created_at   TEXT NOT NULL,
-  PRIMARY KEY (material, grade, manufacturer)
+-- Where stock physically sits.
+CREATE TABLE IF NOT EXISTS warehouses (
+  id          INTEGER PRIMARY KEY,
+  name        TEXT NOT NULL UNIQUE,
+  address     TEXT,
+  created_at  TEXT NOT NULL
 );
 
--- ---------------------------------------------------------------- deals
--- BUY and SELL live in one table. Terms are record-only (no cost math).
+-- The product tree: material -> grade -> (with a manufacturer) product.
+-- A manufacturer is who made the resin, never the party you trade with, and
+-- one manufacturer makes grades of many materials.
+CREATE TABLE IF NOT EXISTS materials (
+  id          INTEGER PRIMARY KEY,
+  name        TEXT NOT NULL UNIQUE,
+  created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS grades (
+  id          INTEGER PRIMARY KEY,
+  material_id INTEGER NOT NULL REFERENCES materials(id),
+  name        TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  UNIQUE (material_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS manufacturers (
+  id          INTEGER PRIMARY KEY,
+  name        TEXT NOT NULL UNIQUE,
+  created_at  TEXT NOT NULL
+);
+
+-- The stock item master. Inventory is kept per product and per warehouse:
+-- PVC S65 from Reliance and PVC S65 from DCW are two products, never pooled.
+CREATE TABLE IF NOT EXISTS products (
+  id              INTEGER PRIMARY KEY,
+  grade_id        INTEGER NOT NULL REFERENCES grades(id),
+  manufacturer_id INTEGER NOT NULL REFERENCES manufacturers(id),
+  packing         TEXT,
+  created_at      TEXT NOT NULL,
+  UNIQUE (grade_id, manufacturer_id)
+);
+
+-- ================================================================ transactions
+
+-- A sauda. BUY: stock received into warehouse_id. SELL: stock dispatched
+-- from warehouse_id, drawn only from lots sitting there.
 CREATE TABLE IF NOT EXISTS deals (
   id             INTEGER PRIMARY KEY,
-  ref            TEXT NOT NULL UNIQUE,
+  ref            TEXT NOT NULL UNIQUE,          -- Sauda No., LE/26-27/0001
   side           TEXT NOT NULL CHECK (side IN ('buy','sell')),
   status         TEXT NOT NULL CHECK (status IN ('draft','booked','cancelled')),
   party_id       INTEGER NOT NULL REFERENCES parties(id),
-  sku_id         INTEGER NOT NULL REFERENCES skus(id),
+  product_id     INTEGER NOT NULL REFERENCES products(id),
+  warehouse_id   INTEGER REFERENCES warehouses(id),
   qty_g          INTEGER NOT NULL CHECK (qty_g > 0),
   rate_paise     INTEGER NOT NULL CHECK (rate_paise >= 0),
   plus_gst       INTEGER NOT NULL DEFAULT 1,
   deal_date      TEXT NOT NULL,
-  -- record-only logistics
+  payment_due    TEXT,
+  ex_place       TEXT,                          -- pricing basis, recorded as typed
   transporter_id INTEGER REFERENCES parties(id),
   freight_by     TEXT,
   delivery_by    TEXT,
   payment_terms  TEXT,
   eway           TEXT,
   remarks        TEXT,
-  warehouse      TEXT,          -- buy: where it lands; sell: where it leaves from
-  payment_due    TEXT,          -- ISO date the money is due
-  ex_place       TEXT,          -- pricing basis, e.g. Ex-Mundra (record only)
-  -- sell-side bookkeeping
   alloc_policy   TEXT,
   uncovered_g    INTEGER NOT NULL DEFAULT 0,
   created_at     TEXT NOT NULL,
   booked_at      TEXT,
   cancelled_at   TEXT
 );
-CREATE INDEX IF NOT EXISTS ix_deals_sku    ON deals(sku_id, status);
-CREATE INDEX IF NOT EXISTS ix_deals_party  ON deals(party_id, status);
-CREATE INDEX IF NOT EXISTS ix_deals_date   ON deals(deal_date DESC, id DESC);
+CREATE INDEX IF NOT EXISTS ix_deals_product   ON deals(product_id, status);
+CREATE INDEX IF NOT EXISTS ix_deals_party     ON deals(party_id, status);
+CREATE INDEX IF NOT EXISTS ix_deals_warehouse ON deals(warehouse_id, status);
+CREATE INDEX IF NOT EXISTS ix_deals_date      ON deals(deal_date DESC, id DESC);
 
--- ---------------------------------------------------------------- lots
--- Every BUY that is booked creates exactly one lot. Inventory = sum of lots.
+-- The stock record: some quantity of one product, from one purchase, at one
+-- cost, sitting in one warehouse. A booked BUY creates the first lot. A
+-- transfer moves grams into a new lot in the other warehouse (parent_lot_id
+-- points back), so what was sold from where stays true forever.
+--
+--   available = qty_g - qty_allocated_g - qty_out_g
+--   qty_allocated_g  sold, through allocations
+--   qty_out_g        moved to another warehouse, or written off
 CREATE TABLE IF NOT EXISTS lots (
   id              INTEGER PRIMARY KEY,
   label           TEXT NOT NULL,
   deal_id         INTEGER NOT NULL REFERENCES deals(id),
-  sku_id          INTEGER NOT NULL REFERENCES skus(id),
+  product_id      INTEGER NOT NULL REFERENCES products(id),
+  warehouse_id    INTEGER NOT NULL REFERENCES warehouses(id),
   supplier_id     INTEGER NOT NULL REFERENCES parties(id),
+  parent_lot_id   INTEGER REFERENCES lots(id),
   rate_paise      INTEGER NOT NULL,
   qty_g           INTEGER NOT NULL CHECK (qty_g > 0),
   qty_allocated_g INTEGER NOT NULL DEFAULT 0 CHECK (qty_allocated_g >= 0),
+  qty_out_g       INTEGER NOT NULL DEFAULT 0 CHECK (qty_out_g >= 0),
   status          TEXT NOT NULL CHECK (status IN ('open','exhausted','cancelled')),
-  warehouse       TEXT,         -- where this lot physically sits
   booked_at       TEXT NOT NULL,
-  CHECK (qty_allocated_g <= qty_g)
+  CHECK (qty_allocated_g + qty_out_g <= qty_g)
 );
-CREATE INDEX IF NOT EXISTS ix_lots_sku ON lots(sku_id, status);
+CREATE INDEX IF NOT EXISTS ix_lots_stock ON lots(product_id, warehouse_id, status);
+CREATE INDEX IF NOT EXISTS ix_lots_deal  ON lots(deal_id);
 
--- ---------------------------------------------------------------- warehouses
--- Stock locations, maintained from Setup. A location belongs to a LOT, not to
--- a stock line: the same PVC HS1000 can sit in Mundra and in Aslali at once,
--- and a sale picks warehouses by picking lots.
-CREATE TABLE IF NOT EXISTS warehouses (
-  name       TEXT PRIMARY KEY,
-  location   TEXT,
-  created_at TEXT NOT NULL
-);
-
--- ---------------------------------------------------------------- allocations
--- The edge of the lineage graph: lot --qty--> sale deal.
--- cost/rate are SNAPSHOTS so history never changes silently.
+-- Which purchased grams a sale consumed, at what cost. Soft-deleted
+-- (active = 0) when a sale is cancelled or re-planned, so history survives.
 CREATE TABLE IF NOT EXISTS allocations (
   id              INTEGER PRIMARY KEY,
   sale_deal_id    INTEGER NOT NULL REFERENCES deals(id),
@@ -150,17 +168,33 @@ CREATE TABLE IF NOT EXISTS allocations (
 CREATE INDEX IF NOT EXISTS ix_alloc_sale ON allocations(sale_deal_id, active);
 CREATE INDEX IF NOT EXISTS ix_alloc_lot  ON allocations(lot_id, active);
 
--- ---------------------------------------------------------------- marks
--- Current market rate per SKU, for unrealised P&L.
+-- Every movement of stock that is not a purchase or a sale.
+--   transfer  qty_g > 0 leaves lot_id and arrives in to_lot_id (other warehouse)
+--   adjust    qty_g < 0 written off lot_id (shortage, damage)
+--             qty_g > 0 found against lot_id, arriving in to_lot_id
+CREATE TABLE IF NOT EXISTS stock_moves (
+  id           INTEGER PRIMARY KEY,
+  kind         TEXT NOT NULL CHECK (kind IN ('transfer','adjust')),
+  lot_id       INTEGER NOT NULL REFERENCES lots(id),
+  to_lot_id    INTEGER REFERENCES lots(id),
+  qty_g        INTEGER NOT NULL CHECK (qty_g != 0),
+  reason       TEXT,
+  move_date    TEXT NOT NULL,
+  status       TEXT NOT NULL CHECK (status IN ('done','cancelled')),
+  created_at   TEXT NOT NULL,
+  cancelled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_moves_lot ON stock_moves(lot_id, status);
+CREATE INDEX IF NOT EXISTS ix_moves_to  ON stock_moves(to_lot_id, status);
+
+-- The last price signal per product, for open P&L.
 CREATE TABLE IF NOT EXISTS marks (
-  sku_id     INTEGER PRIMARY KEY REFERENCES skus(id),
+  product_id INTEGER PRIMARY KEY REFERENCES products(id),
   rate_paise INTEGER NOT NULL,
   source     TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 
--- ---------------------------------------------------------------- events
--- Append-only audit trail. Nothing mutates without a row here.
 CREATE TABLE IF NOT EXISTS events (
   id        INTEGER PRIMARY KEY,
   ts        TEXT NOT NULL,
@@ -174,3 +208,17 @@ CREATE TABLE IF NOT EXISTS events (
   undoable  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_events_ts ON events(id DESC);
+
+-- ================================================================ views
+
+-- A product with its names resolved. Every read that shows a product joins
+-- this; nothing stores "PVC S65 · DCW" as text.
+DROP VIEW IF EXISTS v_products;
+CREATE VIEW v_products AS
+  SELECT p.id, p.grade_id, g.material_id, p.manufacturer_id, p.packing, p.created_at,
+         m.name AS material, g.name AS grade, k.name AS manufacturer,
+         m.name || ' ' || g.name || ' · ' || k.name AS display
+  FROM products p
+  JOIN grades g        ON g.id = p.grade_id
+  JOIN materials m     ON m.id = g.material_id
+  JOIN manufacturers k ON k.id = p.manufacturer_id;

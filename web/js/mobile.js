@@ -1,33 +1,19 @@
-// The phone app.
+// The phone app's screens (the ticket lives in mticket.js).
 //
-// This is not the desktop screen at a narrower width. The workflow it is built
-// around: the trader is mid-call, one hand on the phone, and the deal has to be
-// recorded before the conversation moves on. Everything below follows from that.
-//
-//   * one decision per screen, and choosing it advances - no scrolling a form
-//   * a numeric pad drawn into the page, because the OS keyboard covers half a
-//     phone and asks for precision the situation does not allow
-//   * Buy and Sell parked under the thumb on every screen
-//   * "repeat" shortcuts, because the same party and grade come round again
-//   * the hardware back button walks back through the steps
-//
-// Desktop is untouched; app.js picks between the two.
+// Not the desktop at a narrower width: every list is a column of cards sized
+// for a thumb, and every list is paged from the server exactly as on the
+// desktop. Records are added and edited through the same forms, which a phone
+// shows as bottom sheets.
 
-import { h, mount, svg, toast } from './ui.js';
+import { h, mount, svg, toast, debounce } from './ui.js';
 import * as f from './fmt.js';
 import { api } from './api.js';
-
-const MT = 1e6;
-const rnd = n => (n < 0 ? -Math.round(-n) : Math.round(n));
-const valuePaise = (qty_g, rate_paise) => rnd(qty_g * rate_paise / 1000);
-const todayISO = () => {
-  const d = new Date(), p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-};
+import { pagedList } from './lists.js';
+import { partyForm, productForm, warehouseForm, transferForm, adjustForm, partySub } from './forms.js';
+import { removeRecord, nameForm } from './setup.js';
+import { MOVE_LABEL } from './stock.js';
 
 let ctx = null;
-let ms = null;          // the in-flight ticket
-let screen = null;      // its root element
 
 // ==================================================================== shell
 export function mountShell(appCtx) {
@@ -36,17 +22,15 @@ export function mountShell(appCtx) {
     h('div', { class: 'mhead-top' },
       h('i', { class: 'mhead-dot' }),
       h('div', { class: 'mhead-name', id: 'm-company' }, 'Labdhi Desk'),
-      h('div', { class: 'mhead-stat' },
-        h('b', { id: 'm-pnl', class: 'num' }, '—'),
-        h('span', {}, 'open p&l'))),
+      h('div', { class: 'mhead-stat' }, h('b', { id: 'm-pnl', class: 'num' }, '—'), h('span', {}, 'open p&l'))),
     h('div', { class: 'mhead-strip', id: 'm-strip' }));
 
   const dock = h('div', { class: 'dock' },
     h('div', { class: 'dock-actions' },
-      h('button', { class: 'dock-btn buy', onclick: () => startTicket('buy') }, '↓ Buy'),
-      h('button', { class: 'dock-btn sell', onclick: () => startTicket('sell') }, '↑ Sell')),
+      h('button', { class: 'dock-btn buy', onclick: () => ctx.trade('buy') }, '↓ Buy'),
+      h('button', { class: 'dock-btn sell', onclick: () => ctx.trade('sell') }, '↑ Sell')),
     h('div', { class: 'dock-tabs' },
-      ...[['desk', '▦', 'Desk'], ['flow', '⤳', 'Flow'], ['tape', '≡', 'Tape'], ['setup', '⚙', 'Setup']]
+      ...[['desk', '▦', 'Desk'], ['stock', '▤', 'Stock'], ['flow', '⤳', 'Flow'], ['tape', '≡', 'Tape'], ['setup', '⚙', 'Setup']]
         .map(([route, icon, label]) => h('button', {
           class: 'dock-tab', data: { route }, onclick: () => ctx.go(route)
         }, h('i', {}, icon), label))));
@@ -57,831 +41,390 @@ export function mountShell(appCtx) {
 }
 
 export function syncTabs() {
-  for (const b of document.querySelectorAll('.dock-tab')) {
-    b.classList.toggle('on', b.dataset.route === ctx.route);
-  }
+  for (const b of document.querySelectorAll('.dock-tab')) b.classList.toggle('on', b.dataset.route === ctx.route);
 }
 
-export function paintHeader(desk) {
+export function paintHeader(s) {
   const company = document.getElementById('m-company');
-  if (company) company.textContent = desk.company || 'Labdhi Desk';
+  if (company) company.textContent = s.company || 'Labdhi Desk';
   const pnl = document.getElementById('m-pnl');
   if (pnl) {
-    pnl.textContent = f.inr(desk.unrealised_paise, { sign: true, compact: true });
-    pnl.className = 'num ' + (desk.unrealised_paise >= 0 ? 'up' : 'down');
+    pnl.textContent = f.inr(s.unrealised_paise, { sign: true, compact: true });
+    pnl.className = 'num ' + (s.unrealised_paise >= 0 ? 'up' : 'down');
   }
   const strip = document.getElementById('m-strip');
   if (strip) {
     mount(strip,
-      h('div', {}, 'Stock ', h('b', {}, f.qty(desk.stock_g))),
-      h('div', {}, 'Today ', h('b', { class: desk.realised_today_paise >= 0 ? 'up' : 'down' },
-        f.inr(desk.realised_today_paise, { sign: true, compact: true }))),
-      h('div', {}, 'Value ', h('b', {}, f.inr(desk.stock_value_paise, { compact: true }))));
+      h('div', {}, 'Stock ', h('b', {}, f.qty(s.stock_g))),
+      h('div', {}, 'Today ', h('b', { class: s.realised_today_paise >= 0 ? 'up' : 'down' },
+        f.inr(s.realised_today_paise, { sign: true, compact: true }))),
+      h('div', {}, 'Value ', h('b', {}, f.inr(s.stock_value_paise, { compact: true }))));
   }
 }
+
+const label = (text, count) => h('div', { class: 'mlabel' }, text, count || null);
+const countEl = () => { const el = h('span', {}); el.update = st => { el.textContent = st.total ? `${st.items.length} of ${st.total}` : ''; }; return el; };
+const msearch = (placeholder, onChange, value = '') => h('div', { class: 'msearch' },
+  h('span', { class: 'dim' }, '⌕'),
+  h('input', { type: 'search', placeholder, value, oninput: debounce(e => onChange(e.target.value.trim()), 250) }));
 
 // ===================================================================== desk
-export function renderMobileDesk(root, desk) {
-  paintHeader(desk);
-  // No stat cards: the header strip above already carries stock, today's P&L
-  // and book value, and a phone screen is better spent on what he can act on.
+export function renderMobileDesk(root, s, appCtx) {
+  ctx = appCtx || ctx;
+  paintHeader(s);
+  const count = countEl();
+  const list = pagedList({
+    pageSize: 15,
+    load: p => api.positions(p),
+    onPage: count.update,
+    row: p => h('div', { class: 'mpos' },
+      h('div', { class: 'mpos-main', onclick: () => ctx.go('position', p.product_id) },
+        h('div', { class: 'mpos-name' }, p.product),
+        h('div', { class: 'mpos-sub' }, p.warehouses.map(w => `${w.name} ${f.qty(w.stock_g, { short: true })}`).join(' · '))),
+      h('div', { class: 'mpos-qty', onclick: () => ctx.go('position', p.product_id) },
+        h('b', { class: 'num' }, f.qty(p.stock_g)),
+        h('span', { class: 'num ' + (p.unrealised_paise >= 0 ? 'up' : 'down') },
+          f.inr(p.unrealised_paise, { sign: true, compact: true }))),
+      h('button', { class: 'mpos-go', title: 'Sell',
+        onclick: () => ctx.trade('sell', { product: { id: p.product_id, display: p.product } }) }, '↑')),
+    empty: () => h('div', { class: 'empty' }, h('h3', {}, 'No stock yet'), h('div', {}, 'Tap Buy to record your first purchase.'))
+  });
   mount(root, h('div', { class: 'view' },
-    desk.attention && desk.attention.length
+    s.attention && s.attention.length
       ? h('div', { class: 'mflow', style: { paddingTop: '14px' } },
-          ...desk.attention.slice(0, 3).map(a => h('div', { class: 'alert ' + a.level },
-            h('i', { class: 'bar' }),
-            h('div', {}, h('b', {}, a.title), h('div', {}, h('span', {}, a.detail))))))
+          ...s.attention.slice(0, 3).map(a => h('div', { class: 'alert ' + a.level },
+            h('i', { class: 'bar' }), h('div', {}, h('b', {}, a.title), h('div', {}, h('span', {}, a.detail))))))
       : null,
-
-    h('div', { class: 'mdesk' },
-      h('div', { class: 'mlabel' }, 'Positions',
-        h('span', {}, `${desk.positions.length} of ${desk.positions_matched}`)),
-      ...desk.positions.map(p => h('div', { class: 'mpos' },
-        h('div', { class: 'mpos-main', onclick: () => ctx.go('position', p.sku_id) },
-          h('div', { class: 'mpos-name' }, p.material),
-          h('div', { class: 'mpos-sub' },
-            `${f.rate(p.cost_paise)} avg · ${p.open_lots} lot${p.open_lots === 1 ? '' : 's'}`)),
-        h('div', { class: 'mpos-qty', onclick: () => ctx.go('position', p.sku_id) },
-          h('b', { class: 'num' }, f.qty(p.stock_g)),
-          h('span', { class: 'num ' + (p.unrealised_paise >= 0 ? 'up' : 'down') },
-            f.inr(p.unrealised_paise, { sign: true, compact: true }))),
-        h('button', {
-          class: 'mpos-go', title: 'Sell from this position',
-          onclick: () => startTicket('sell', { sku_id: p.sku_id, material: p.material })
-        }, '↑'))),
-      desk.positions.length ? null : h('div', { class: 'empty' },
-        h('h3', {}, 'No stock yet'), h('div', {}, 'Tap Buy to record your first purchase.')))));
+    h('div', { class: 'mdesk' }, label('Positions', count), list.el)));
+  list.reload({});
 }
 
-// =================================================================== ticket
-export function startTicket(side, prefill = {}) {
-  ms = {
-    side,
-    party: prefill.party_id ? { id: prefill.party_id, name: prefill.party_name } : null,
-    sku: prefill.sku_id ? { id: prefill.sku_id, display: prefill.material } : null,
-    line: { material: '', grade: '', manufacturer: '' },
-    position: null, lots: [], alloc: {},
-    qty_g: 0, rate_paise: 0, entry: '',
-    lastRate: prefill.rate_paise || 0,
-    options: [], query: '', browse: null, editingLot: null,
-    terms: { transporter: '', freight_by: '', delivery_by: '', payment_terms: '', eway: '', remarks: '' },
-    sauda_no: '', saudaAuto: true,
-    warehouse: lastWarehouse(), warehouses: [],
-    plus_gst: true, payment_due: '', ex_place: '',
-    date: todayISO(), busy: false, error: ''
-  };
-  document.body.classList.add('trading');
-  screen = h('div', { class: 'mtrade ' + side });
-  document.body.appendChild(screen);
-  history.pushState({ ticket: true }, '');
-  window.addEventListener('popstate', onPop);
-  if (ms.sku && ms.sku.id) loadSku(ms.sku.id);
-  loadStep();
-  refreshSauda(true);
-  loadWarehouses();
-  paint();
-}
+// ==================================================================== stock
+export async function renderMobileStock(root, appCtx) {
+  ctx = appCtx || ctx;
+  const st = ctx.mstock || (ctx.mstock = { warehouse_id: '', q: '', detail: null });
+  if (st.detail) return stockItem(root, st);
 
-// The last warehouse used on this device is the likeliest next one.
-function lastWarehouse() { try { return localStorage.getItem('labdhi.lastWarehouse') || ''; } catch (_) { return ''; } }
-function rememberWarehouse(n) { try { localStorage.setItem('labdhi.lastWarehouse', n); } catch (_) { /* private mode */ } }
-
-async function refreshSauda(force) {
-  if (!ms) return;
-  const r = await api.saudaNext(ms.date).catch(() => null);
-  if (!ms || !r) return;
-  if (force || ms.saudaAuto) { ms.sauda_no = r.sauda_no; ms.saudaAuto = true; paint(); }
-}
-
-async function loadWarehouses() {
-  const r = await api.warehouses().catch(() => ({ warehouses: [] }));
-  if (ms) { ms.warehouses = r.warehouses; }
-}
-
-function addDays(iso, days) {
-  const d = new Date((iso || todayISO()) + 'T00:00:00');
-  d.setDate(d.getDate() + days);
-  const p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-
-function onPop() {
-  if (!ms) return;
-  if (stepIndex() > 0) { history.pushState({ ticket: true }, ''); back(); }
-  else closeTicket(false);
-}
-
-function closeTicket(popHistory = true) {
-  window.removeEventListener('popstate', onPop);
-  if (screen) screen.remove();
-  screen = null; ms = null;
-  document.body.classList.remove('trading');
-  if (popHistory && history.state && history.state.ticket) history.back();
-}
-
-// The steps that actually apply to this ticket. A sale with a single lot has
-// nothing to split, so that screen simply does not exist.
-function steps() {
-  const list = ['who', 'what', 'qty', 'rate'];
-  if (ms.side === 'sell' && ms.lots.filter(l => l.available_g > 0).length > 1) list.push('split');
-  list.push('review');
-  return list;
-}
-
-function stepIndex() { return ms.stepIndex || 0; }
-function current() { return steps()[Math.min(stepIndex(), steps().length - 1)]; }
-
-function go(delta) {
-  const max = steps().length - 1;
-  ms.stepIndex = Math.max(0, Math.min(max, stepIndex() + delta));
-  ms.entry = ''; ms.query = ''; ms.browse = null; ms.editingLot = null;
-  loadStep();
-  paint();
-  const body = screen && screen.querySelector('.mt-body');
-  if (body) body.scrollTop = 0;
-}
-const next = () => go(1);
-const back = () => (stepIndex() === 0 ? closeTicket() : go(-1));
-
-// --------------------------------------------------------------- data
-async function loadStep() {
-  const step = current();
-  if (step === 'who') {
-    const r = await api.parties(ms.query, ms.side === 'buy' ? 'supplier' : 'customer');
-    if (ms) { ms.options = r.results; paint(); }
-  } else if (step === 'what') {
-    if (ms.browse) return loadBrowse();
-    if (ms.side === 'sell') {
-      const r = await api.positions({ q: ms.query, limit: 40 });
-      if (ms) { ms.options = r.positions; paint(); }
-    } else {
-      const r = await api.materials(ms.query, false);
-      if (ms) { ms.options = r.results; paint(); }
-    }
-  }
-}
-
-async function loadBrowse() {
-  const level = ms.browse;
-  const r = await api.catalog(level,
-    level === 'material' ? undefined : ms.line.material,
-    level === 'manufacturer' ? ms.line.grade : undefined,
-    ms.side === 'sell' ? true : undefined);
-  if (ms) { ms.options = r.options; paint(); }
-}
-
-async function loadSku(skuId) {
-  const [pos, lots] = await Promise.all([
-    api.position(skuId).catch(() => null),
-    api.lots(skuId).catch(() => ({ lots: [] }))
-  ]);
-  if (!ms) return;
-  ms.position = pos;
-  ms.lots = (lots.lots || []).slice().sort((a, b) => a.rate_paise - b.rate_paise);
-  ms.alloc = {};
-  if (pos) {
-    ms.line = { material: pos.sku.material, grade: pos.sku.grade, manufacturer: pos.sku.manufacturer };
-    ms.sku = { id: pos.sku.id, display: pos.sku.display };
-    if (!ms.rate_paise) {
-      ms.rate_paise = ms.lastRate || (ms.side === 'sell'
-        ? (pos.mark_paise || (pos.cost_paise ? pos.cost_paise + 300 : 0))
-        : (pos.cost_paise || pos.mark_paise || 0));
-    }
-  }
-  paint();
-}
-
-// --------------------------------------------------------------- allocation
-function flow() {
-  const rows = ms.lots.map(lot => {
-    const take = Math.max(0, Math.min(lot.available_g, ms.alloc[lot.id] || 0));
-    const marginRate = ms.rate_paise ? ms.rate_paise - lot.rate_paise : 0;
-    return { lot, take, marginRate, margin: valuePaise(take, marginRate) };
+  const whs = await api.warehouses({ limit: 50 });
+  const count = countEl();
+  const list = pagedList({
+    pageSize: 20, load: p => api.stock(p), onPage: count.update,
+    row: r => h('button', { class: 'mflow-card mcard-btn', onclick: () => { st.detail = r; renderMobileStock(root, ctx); } },
+      h('div', { class: 'mflow-head' },
+        h('div', { class: 'grow' }, h('b', {}, `${r.material} ${r.grade} · ${r.manufacturer}`),
+          h('span', {}, `${r.warehouse} · ${r.lots} lot${r.lots === 1 ? '' : 's'} · cost ${f.rate(r.cost_paise)}`)),
+        h('div', { class: 'mflow-money' }, h('b', { class: 'num' }, f.qty(r.stock_g)),
+          h('span', {}, f.inr(r.stock_value_paise, { compact: true }))))),
+    empty: () => h('div', { class: 'empty' }, h('h3', {}, 'Nothing in stock here'))
   });
-  const assigned = rows.reduce((s, r) => s + r.take, 0);
-  const cost = rows.reduce((s, r) => s + r.take * r.lot.rate_paise, 0);
-  return {
-    rows, assigned, left: ms.qty_g - assigned,
-    margin: rows.reduce((s, r) => s + r.margin, 0),
-    avgCost: assigned ? rnd(cost / assigned) : 0
-  };
+  const reload = () => list.reload({ q: st.q, warehouse_id: st.warehouse_id });
+
+  mount(root, h('div', { class: 'view' },
+    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
+      h('div', { class: 'mwh-row' },
+        h('button', { class: 'mwh' + (st.warehouse_id ? '' : ' on'), onclick: () => { st.warehouse_id = ''; renderMobileStock(root, ctx); } },
+          h('b', {}, 'All'), h('span', {}, 'warehouses')),
+        ...whs.items.map(w => h('button', {
+          class: 'mwh' + (String(st.warehouse_id) === String(w.id) ? ' on' : ''),
+          onclick: () => { st.warehouse_id = w.id; renderMobileStock(root, ctx); }
+        }, h('b', {}, w.name), h('span', {}, f.qty(w.stock_g)))),
+        h('button', { class: 'mwh add', onclick: async () => { if (await warehouseForm()) renderMobileStock(root, ctx); } },
+          h('b', {}, '+'), h('span', {}, 'warehouse'))),
+      msearch('Product, grade or maker', q => { st.q = q; reload(); }, st.q)),
+    h('div', { class: 'mflow' }, label('Stock by warehouse', count), list.el)));
+  reload();
 }
 
-// Fill whatever is still unassigned from the oldest stock, leaving alone any
-// amount he typed himself. Wiping his own numbers to "help" is the behaviour
-// that made the desktop version infuriating.
-function autoAssign() {
-  let left = ms.qty_g - Object.values(ms.alloc).reduce((a, b) => a + (b || 0), 0);
-  if (left <= 0) return;
-  for (const lot of ms.lots.slice().sort((a, b) =>
-    String(a.deal_date).localeCompare(b.deal_date) || a.id - b.id)) {
-    if (left <= 0) break;
-    const already = ms.alloc[lot.id] || 0;
-    const take = Math.min(lot.available_g - already, left);
-    if (take <= 0) continue;
-    ms.alloc[lot.id] = already + take;
-    left -= take;
-  }
+// One product in one warehouse: its lots, each movable, and its ledger.
+async function stockItem(root, st) {
+  const r = st.detail;
+  const { items: lots } = await api.lots(r.product_id, r.warehouse_id);
+  const after = () => { ctx.refresh(); stockItem(root, st); };
+  const ledger = pagedList({
+    pageSize: 15, load: p => api.moves({ ...p, product_id: r.product_id, warehouse_id: r.warehouse_id }),
+    row: m => ledgerCard(m)
+  });
+  const here = lots.reduce((s, l) => s + l.available_g, 0);
+  mount(root, h('div', { class: 'view' },
+    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
+      h('button', { class: 'mmore', style: { marginBottom: '12px' }, onclick: () => { st.detail = null; renderMobileStock(root, ctx); } },
+        '‹ All stock'),
+      h('div', { class: 'mpos-hero' },
+        h('b', {}, r.product),
+        h('div', { class: 'mpos-hero-row' },
+          heroStat('Warehouse', r.warehouse), heroStat('In stock', f.qty(here)),
+          heroStat('Avg cost', f.rate(r.cost_paise)), heroStat('Value', f.inr(r.stock_value_paise, { compact: true }))))),
+    h('div', { class: 'mflow' }, label('Lots here'),
+      ...lots.map(l => lotCard({ ...l, product: r.product }, after)),
+      label('Ledger'), ledger.el)));
+  ledger.reload({});
 }
 
-function effectiveAlloc() {
-  const open = ms.lots.filter(l => l.available_g > 0);
-  if (ms.side !== 'sell') return null;
-  if (open.length === 1) return [{ lot_id: open[0].id, qty_g: ms.qty_g }];
-  return flow().rows.map(r => ({ lot_id: r.lot.id, qty_g: r.take }));
+function lotCard(l, after) {
+  return h('div', { class: 'mflow-card' },
+    h('div', { class: 'mflow-head' },
+      h('span', { class: 'mflow-side lot' }, f.rate(l.rate_paise)),
+      h('div', { class: 'grow' }, h('b', {}, l.supplier_name),
+        h('span', {}, `${l.deal_ref} · ${f.date(l.deal_date)} · ${l.warehouse}${l.parent_lot_id ? ' · moved in' : ''}`)),
+      h('div', { class: 'mflow-money' }, h('b', { class: 'num' }, f.qty(l.available_g)), h('span', { class: 'num' }, `of ${f.qty(l.qty_g)}`))),
+    l.available_g > 0 ? h('div', { class: 'mcard-acts' },
+      h('button', { class: 'mchip', onclick: async () => {
+        const mv = await transferForm(l);
+        if (mv) { toast(`Moved ${f.qty(mv.qty_g)} to ${mv.to_warehouse}`); after(); }
+      } }, '⇄ Move'),
+      h('button', { class: 'mchip', onclick: async () => {
+        const mv = await adjustForm(l);
+        if (mv) { toast('Adjustment recorded'); after(); }
+      } }, '± Adjust')) : null);
 }
 
-function sellCost() {
-  const open = ms.lots.filter(l => l.available_g > 0);
-  if (open.length === 1) return open[0].rate_paise;
-  const fl = flow();
-  return fl.assigned ? fl.avgCost : (ms.position ? ms.position.cost_paise : 0);
+function ledgerCard(m) {
+  const into = m.qty_g > 0;
+  const who = m.kind === 'transfer_in' ? `from ${m.counterparty}` : m.kind === 'transfer_out' ? `to ${m.counterparty}`
+    : (m.counterparty || m.note || '');
+  return h('div', { class: 'mledger' },
+    h('span', { class: 'mv-tag ' + m.kind }, MOVE_LABEL[m.kind]),
+    h('div', { class: 'grow' }, h('b', {}, who || '—'), h('span', {}, `${f.date(m.date)}${m.ref ? ' · ' + m.ref : ''}`)),
+    h('div', { class: 'mflow-money' },
+      h('b', { class: 'num ' + (into ? 'up' : 'down') }, (into ? '+' : '−') + f.mt(Math.abs(m.qty_g))),
+      m.balance_g !== undefined ? h('span', { class: 'num' }, `bal ${f.mt(m.balance_g)}`) : null));
 }
 
-function ready() {
-  if (!ms.party || !ms.sku || ms.qty_g <= 0 || ms.rate_paise <= 0) return false;
-  if (ms.side === 'sell' && ms.lots.filter(l => l.available_g > 0).length > 1) {
-    return flow().left === 0;
-  }
-  return true;
-}
-
-// ==================================================================== paint
-function paint() {
-  if (!screen || !ms) return;
-  const step = current();
-  const all = steps();
-
-  mount(screen,
-    h('div', { class: 'mt-head' },
-      h('button', { class: 'mt-back', onclick: back }, '‹'),
-      h('div', { class: 'mt-title' },
-        h('b', { class: 'mt-kind' }, ms.side === 'sell' ? 'Sell' : 'Buy'),
-        h('span', {}, crumbs())),
-      h('button', { class: 'mt-back', onclick: () => closeTicket() }, '✕')),
-    h('div', { class: 'mt-steps' },
-      ...all.map((_, i) => h('i', { class: i <= stepIndex() ? 'done' : '' }))),
-    h('div', { class: 'mt-body' }, body(step)),
-    foot(step));
-}
-
-function crumbs() {
-  const bits = [];
-  if (ms.party) bits.push(ms.party.name);
-  if (ms.sku) bits.push(ms.sku.display);
-  if (ms.qty_g) bits.push(f.qty(ms.qty_g));
-  if (ms.rate_paise && current() !== 'rate') bits.push(f.rate(ms.rate_paise));
-  return bits.join('  ·  ') || (ms.side === 'sell' ? 'material out' : 'material in');
-}
-
-function body(step) {
-  if (step === 'who') return stepWho();
-  if (step === 'what') return stepWhat();
-  if (step === 'qty') return stepQty();
-  if (step === 'rate') return stepRate();
-  if (step === 'split') return stepSplit();
-  return stepReview();
-}
-
-// --------------------------------------------------------------- who
-function stepWho() {
-  const isBuy = ms.side === 'buy';
-  const typed = ms.query.trim();
-  const exact = ms.options.some(p => p.name.toLowerCase() === typed.toLowerCase());
-  return [
-    h('div', { class: 'mt-q' }, isBuy ? 'Buying from?' : 'Selling to?'),
-    h('div', { class: 'mt-hint' }, 'Most recent first'),
-    h('div', { class: 'msearch' },
-      h('span', { class: 'dim' }, '⌕'),
-      h('input', {
-        placeholder: isBuy ? 'Supplier name' : 'Buyer name', value: ms.query,
-        oninput: e => { ms.query = e.target.value; loadStep(); }
-      })),
-    ...ms.options.slice(0, 12).map(p => h('button', {
-      class: 'mopt', onclick: () => { ms.party = p; next(); }
-    },
-      h('div', { class: 'mopt-main' },
-        h('b', {}, p.name),
-        (p.last_deal || p.gstin)
-          ? h('span', {}, [p.last_deal ? `${p.deal_count} deals · ${f.ago(p.last_deal)}` : null,
-                           p.gstin].filter(Boolean).join(' · '))
-          : null))),
-    typed && !exact
-      ? h('button', {
-          class: 'mopt ghost',
-          onclick: () => { ms.party = { id: null, name: typed }; next(); }
-        }, `+ New: ${typed}`)
-      : null
-  ];
-}
-
-// --------------------------------------------------------------- what
-function stepWhat() {
-  if (ms.browse) return stepBrowse();
-  const sell = ms.side === 'sell';
-  return [
-    h('div', { class: 'mt-q' }, sell ? 'Selling what?' : 'Buying what?'),
-    h('div', { class: 'mt-hint' }, sell ? 'Only what you hold' : 'Recently traded'),
-    h('div', { class: 'msearch' },
-      h('span', { class: 'dim' }, '⌕'),
-      h('input', {
-        placeholder: 'Material, grade or maker', value: ms.query,
-        oninput: e => { ms.query = e.target.value; loadStep(); }
-      })),
-    ...ms.options.slice(0, 14).map(o => {
-      const id = o.sku_id || o.id;
-      const label = o.display || o.material;
-      return h('button', {
-        class: 'mopt', onclick: () => { ms.sku = { id, display: label }; loadSku(id); next(); }
-      },
-        h('div', { class: 'mopt-main' },
-          h('b', {}, label),
-          o.cost_paise ? h('span', {}, `cost ${f.rate(o.cost_paise)}`)
-            : (o.last_deal ? h('span', {}, `last traded ${f.ago(o.last_deal)}`) : null)),
-        o.stock_g ? h('span', { class: 'mopt-tag up' }, f.qty(o.stock_g)) : null);
-    }),
-    h('button', {
-      class: 'mopt ghost', onclick: () => { ms.browse = 'material'; ms.query = ''; loadBrowse(); }
-    }, sell ? 'Browse all materials' : '+ New material, grade or maker')
-  ];
-}
-
-const BROWSE_TITLE = { material: 'Which material?', grade: 'Which grade?', manufacturer: 'Which manufacturer?' };
-
-function stepBrowse() {
-  const level = ms.browse;
-  const typed = ms.query.trim();
-  const shown = typed
-    ? ms.options.filter(o => o.value.toLowerCase().includes(typed.toLowerCase()))
-    : ms.options;
-  const exact = ms.options.some(o => o.value.toLowerCase() === typed.toLowerCase());
-  return [
-    h('div', { class: 'mt-q' }, BROWSE_TITLE[level]),
-    h('div', { class: 'mt-hint' },
-      level === 'manufacturer' ? 'Who made it — not who you trade with' : ' '),
-    h('div', { class: 'msearch' },
-      h('span', { class: 'dim' }, '⌕'),
-      h('input', {
-        placeholder: 'Type to filter or add', value: ms.query,
-        oninput: e => { ms.query = e.target.value; paint(); }
-      })),
-    ...shown.slice(0, 14).map(o => h('button', {
-      class: 'mopt', onclick: () => pickLevel(level, o.value)
-    },
-      h('div', { class: 'mopt-main' }, h('b', {}, o.value)),
-      o.stock_g ? h('span', { class: 'mopt-tag up' }, f.qty(o.stock_g)) : null)),
-    ms.side === 'buy' && typed && !exact
-      ? h('button', { class: 'mopt ghost', onclick: () => addLevel(level, typed) },
-          `+ Add "${typed}"`)
-      : null
-  ];
-}
-
-async function pickLevel(level, value) {
-  ms.line[level] = value;
-  ms.query = '';
-  if (level === 'material') { ms.line.grade = ''; ms.line.manufacturer = ''; ms.browse = 'grade'; }
-  else if (level === 'grade') { ms.line.manufacturer = ''; ms.browse = 'manufacturer'; }
-  else {
-    ms.browse = null;
-    const r = await api.resolveSku(ms.line.material, ms.line.grade, ms.line.manufacturer)
-      .catch(() => ({ sku: null }));
-    if (!ms) return;
-    if (r.sku) { ms.sku = { id: r.sku.id, display: r.sku.display }; loadSku(r.sku.id); }
-    else {
-      ms.sku = { id: null, display: `${ms.line.material} ${ms.line.grade} · ${ms.line.manufacturer}` };
-      ms.lots = []; ms.position = null;
-    }
-    return next();
-  }
-  loadBrowse();
-  paint();
-}
-
-async function addLevel(level, value) {
-  const body = { material: level === 'material' ? value : ms.line.material };
-  if (level === 'grade') body.grade = value;
-  if (level === 'manufacturer') { body.grade = ms.line.grade; body.manufacturer = value; }
-  try { await api.addCatalog(body); } catch (err) { toast(err.message, { kind: 'err' }); return; }
-  pickLevel(level, value);
-}
-
-// --------------------------------------------------------------- quantity
-function stepQty() {
-  const stock = ms.side === 'sell' && ms.position ? ms.position.stock_g : 0;
-  const live = ms.entry !== '' ? Math.round(parseFloat(ms.entry || '0') * MT) : ms.qty_g;
-  const over = stock > 0 && live > stock;
-  const quick = stock
-    ? [['25%', Math.round(stock * .25)], ['50%', Math.round(stock * .5)],
-       ['75%', Math.round(stock * .75)], ['All', stock]]
-    : [['5 MT', 5 * MT], ['10 MT', 10 * MT], ['20 MT', 20 * MT], ['25 MT', 25 * MT]];
-
-  return [
-    h('div', { class: 'mt-q' }, 'How much?'),
-    h('div', { class: 'mt-hint' },
-      stock ? `You hold ${f.qty(stock)} of ${ms.sku.display}` : ms.sku.display),
-    h('div', { class: 'mnum-value' + (over ? ' warn' : '') },
-      h('b', {}, (ms.entry !== '' ? ms.entry : (live / MT || 0).toString()) + ' MT'),
-      h('small', {}, over
-        ? `More than you hold — max ${f.qty(stock)}`
-        : (live ? `${Math.round(live / 1000).toLocaleString('en-IN')} kg` : 'tap a shortcut or type'))),
-    h('div', { class: 'mchips g4' }, ...quick.map(([label, g]) => h('button', {
-      class: 'mchip' + (ms.qty_g === g && ms.entry === '' ? ' on' : ''),
-      onclick: () => { ms.qty_g = g; ms.entry = ''; if (ms.side === 'sell') autoIfSingle(); next(); }
-    }, label))),
-    numpad(1, () => {
-      const v = Math.round(parseFloat(ms.entry || '0') * MT);
-      ms.qty_g = stock ? Math.min(v, stock) : v;
-    })
-  ];
-}
-
-function autoIfSingle() {
-  const open = ms.lots.filter(l => l.available_g > 0);
-  if (open.length === 1) ms.alloc = { [open[0].id]: ms.qty_g };
-}
-
-// --------------------------------------------------------------- rate
-// Rates are typed per MT, the way they are quoted. A per-MT figure is exact only
-// in Rs 10 steps; anything finer is refused and Next stays locked, rather than
-// quietly storing a number the trader never typed.
-function stepRate() {
-  const typed = ms.entry !== '';
-  const live = typed ? f.fromPerMt(Number(ms.entry)) : ms.rate_paise;
-  const bad = typed && live === null;
-  const paise = live || 0;
-  const cost = ms.side === 'sell' ? sellCost() : 0;
-  const marginRate = cost && paise ? paise - cost : 0;
-  const margin = valuePaise(ms.qty_g, marginRate);
-  const good = marginRate >= 0;
-  const shown = typed ? Number(ms.entry || 0).toLocaleString('en-IN')
-                      : f.perMt(ms.rate_paise).toLocaleString('en-IN');
-
-  return [
-    h('div', { class: 'mt-q' }, ms.side === 'sell' ? 'At what rate?' : 'At what cost?'),
-    h('div', { class: 'mt-hint' }, `${f.qty(ms.qty_g)} · ${ms.sku.display}`),
-
-    ms.side === 'sell' && cost
-      ? h('div', { class: 'mlive ' + (paise ? (good ? 'good' : 'bad') : '') },
-          h('div', { class: 'mlive-top' },
-            h('b', { class: 'num ' + (good ? 'up' : 'down') }, f.inr(margin, { sign: true })),
-            h('span', { class: 'num ' + (good ? 'up' : 'down') }, f.rateDelta(marginRate) + '/MT')),
-          h('div', { class: 'mlive-sub' },
-            `your cost ${f.rate(cost)}/MT · sale value ${f.inr(valuePaise(ms.qty_g, paise))}`))
-      : (paise ? h('div', { class: 'mlive' },
-          h('div', { class: 'mlive-top' }, h('b', { class: 'num' }, f.inr(valuePaise(ms.qty_g, paise)))),
-          h('div', { class: 'mlive-sub' }, 'total value of this purchase')) : null),
-
-    h('div', { class: 'mnum-value' + (bad ? ' warn' : '') },
-      h('b', {}, '₹' + shown),
-      h('small', {}, bad ? 'Rates go in steps of ₹10 per MT' : 'per MT, basic rate')),
-
-    h('div', { class: 'mchips g3' },
-      ...[-50, -25, -10, 10, 25, 50].map(d => h('button', {
-        class: 'mchip',
-        onclick: () => {
-          const base = typed && live !== null ? live : ms.rate_paise;
-          ms.rate_paise = Math.max(0, base + d); ms.entry = ''; paint();
+// ================================================================ position
+export async function renderMobilePosition(root, productId, appCtx) {
+  ctx = appCtx || ctx;
+  const p = await api.position(productId);
+  const open = p.lots.filter(l => l.available_g > 0);
+  const after = () => { ctx.refresh(); renderMobilePosition(root, productId, ctx); };
+  mount(root, h('div', { class: 'view' },
+    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
+      h('button', { class: 'mmore', style: { marginBottom: '12px' }, onclick: () => ctx.go('desk') }, '‹ Back to desk'),
+      h('div', { class: 'mpos-hero' },
+        h('b', {}, p.product.display),
+        h('div', { class: 'mpos-hero-row' },
+          heroStat('In stock', f.qty(p.stock_g)), heroStat('Avg cost', f.rate(p.cost_paise)),
+          heroStat('Mark', p.mark_paise ? f.rate(p.mark_paise) : '—'),
+          heroStat('Open P&L', f.inr(p.unrealised_paise, { sign: true, compact: true }), p.unrealised_paise >= 0 ? 'up' : 'down')),
+        p.warehouses.length ? h('div', { class: 'mdeal-meta' },
+          ...p.warehouses.map(w => h('span', {}, `${w.name} ${f.qty(w.stock_g)}`))) : null),
+      open.length ? h('button', { class: 'dock-btn sell', style: { marginTop: '12px', width: '100%' },
+        onclick: () => ctx.trade('sell', { product: { id: productId, display: p.product.display } }) }, '↑ Sell this product') : null),
+    h('div', { class: 'mflow' }, label('Lots', h('span', {}, `${open.length} open`)),
+      ...p.lots.map(l => {
+        const card = lotCard({ ...l, product: p.product.display }, after);
+        if (l.outflows && l.outflows.length) {
+          card.appendChild(h('div', { class: 'mflow-links' }, ...l.outflows.map(o => h('div', { class: 'mflow-link' },
+            h('i', { style: { background: o.margin_paise >= 0 ? 'var(--up)' : 'var(--down)' } }),
+            h('span', { class: 'qty' }, f.qty(o.qty_g)),
+            h('span', { class: 'who' }, `to ${o.customer_name} @ ${f.rate(o.sale_rate_paise)}`),
+            h('span', { class: 'pl ' + (o.margin_paise >= 0 ? 'up' : 'down') }, f.inr(o.margin_paise, { sign: true, compact: true }))))));
         }
-      }, (d > 0 ? '+' : '−') + '₹' + Math.abs(d * f.PER_MT).toLocaleString('en-IN')))),
-
-    h('button', {
-      class: 'mgst' + (ms.plus_gst ? ' on' : ''),
-      onclick: () => { ms.plus_gst = !ms.plus_gst; paint(); }
-    }, ms.plus_gst ? '✓ GST extra — rate excludes GST' : 'GST included in this rate'),
-
-    numpad(2, null, null, { noDot: true })
-  ];
+        return card;
+      }))));
 }
 
-// --------------------------------------------------------------- split
-function stepSplit() {
-  if (ms.editingLot) return lotEditor();
-  const fl = flow();
-  const done = fl.left === 0;
-  const over = fl.left < 0;
+function heroStat(labelText, value, tone) {
+  return h('div', {}, h('span', {}, labelText), h('b', { class: 'num ' + (tone || '') }, value));
+}
 
-  return [
-    h('div', { class: 'mt-q' }, 'From which stock?'),
-    h('div', { class: 'mt-hint' }, 'Tap a lot to set how much comes out of it'),
-    h('div', { class: 'massign' + (done ? ' done' : '') },
-      h('div', {},
-        h('b', { class: 'num ' + (done ? 'up' : over ? 'down' : '') },
-          done ? 'All set' : f.qty(Math.abs(fl.left))),
-        h('span', {}, done ? `${f.qty(ms.qty_g)} assigned`
-          : over ? 'too much — take some back' : 'still to assign')),
+// ===================================================================== tape
+// Every card carries the tape's columns: Sauda No., date, type, party,
+// product/grade, quantity, rate, warehouse, status and delivery.
+export async function renderMobileTape(root, appCtx) {
+  ctx = appCtx || ctx;
+  const st = { q: '', side: '', warehouse_id: '' };
+  const whs = await api.warehouses({ limit: 100 });
+  const count = countEl();
+  const list = pagedList({ pageSize: 20, load: p => api.deals(p), onPage: count.update, row: d => dealCard(d, () => reload()),
+    empty: () => h('div', { class: 'empty' }, h('h3', {}, 'No deals')) });
+  const reload = () => list.reload({ q: st.q, side: st.side, warehouse_id: st.warehouse_id });
+
+  const sideChips = h('div', { class: 'mchips g3 filter', style: { padding: '0 0 8px' } });
+  const paintChips = () => mount(sideChips, ...[['', 'All'], ['buy', 'Bought'], ['sell', 'Sold']].map(([v, text]) => h('button', {
+    class: 'mchip' + (st.side === v ? ' on' : ''), onclick: () => { st.side = v; paintChips(); reload(); }
+  }, text)));
+  paintChips();
+
+  mount(root, h('div', { class: 'view' },
+    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
+      msearch('Sauda No., party, product, warehouse', q => { st.q = q; reload(); }),
+      sideChips,
+      h('select', { class: 'mselect', onchange: e => { st.warehouse_id = e.target.value; reload(); } },
+        h('option', { value: '' }, 'All warehouses'),
+        ...whs.items.map(w => h('option', { value: w.id }, w.name)))),
+    h('div', { class: 'mflow' }, label('Trades', count), list.el)));
+  reload();
+}
+
+function dealCard(d, reload) {
+  const sell = d.side === 'sell';
+  const cell = (k, v) => h('div', {}, h('span', {}, k), h('b', {}, v || '—'));
+  const card = h('div', { class: 'mdeal ' + d.status },
+    h('div', { class: 'mdeal-top' },
+      h('span', { class: 'mono' }, d.ref),
+      h('span', { class: 'dim' }, f.date(d.deal_date)),
+      h('span', { class: 'side-tag ' + d.side }, f.sideLabel(d.side)),
       h('span', { class: 'grow' }),
-      fl.assigned
-        ? h('button', { class: 'massign-act', onclick: () => { ms.alloc = {}; paint(); } }, 'Clear')
-        : null,
-      h('button', {
-        class: 'massign-act',
-        onclick: () => { autoAssign(); paint(); }
-      }, fl.assigned ? 'Fill rest' : 'Auto')),
-    ...fl.rows.map(row => h('button', {
-      class: 'mlot' + (row.take > 0 ? ' on' : ''),
-      onclick: () => { ms.editingLot = row.lot.id; ms.entry = ''; paint(); }
-    },
-      h('div', { class: 'mlot-rate num' }, f.rate(row.lot.rate_paise)),
-      h('div', { class: 'mlot-main' },
-        h('b', {}, row.lot.supplier_name),
-        h('span', {}, `${f.qty(row.lot.available_g)} free · ${row.lot.warehouse || 'no warehouse'} · ${f.date(row.lot.deal_date)}`)),
-      h('div', { class: 'mlot-take' },
-        h('b', { class: 'num ' + (row.take ? '' : 'dim') }, row.take ? f.qty(row.take) : '—'),
-        h('span', { class: row.marginRate >= 0 ? 'up' : 'down' },
-          f.rateDelta(row.marginRate) + '/MT'))))
-  ];
-}
+      h('span', { class: 'pill ' + d.status }, f.statusLabel(d.status))),
+    h('div', { class: 'mdeal-party' }, d.party_name),
+    h('div', { class: 'mdeal-product' }, `${d.material} ${d.grade}`, h('small', {}, ` · ${d.manufacturer}`)),
+    h('div', { class: 'mdeal-grid' },
+      cell('Qty (MT)', f.mt(d.qty_g)),
+      cell('Rate (₹/MT)', f.perMt(d.rate_paise).toLocaleString('en-IN')),
+      cell('Warehouse', d.warehouse),
+      cell('Delivery', d.delivery_by)),
+    sell ? h('div', { class: 'mdeal-margin ' + (d.margin_paise >= 0 ? 'up' : 'down') },
+      `margin ${f.inr(d.margin_paise, { sign: true, compact: true })}`) : null);
 
-function lotEditor() {
-  const lot = ms.lots.find(l => l.id === ms.editingLot);
-  const fl = flow();
-  const others = fl.assigned - (ms.alloc[lot.id] || 0);
-  const room = Math.min(lot.available_g, ms.qty_g - others);
-  const live = ms.entry !== '' ? Math.round(parseFloat(ms.entry || '0') * MT) : (ms.alloc[lot.id] || 0);
-
-  const set = g => {
-    ms.alloc[lot.id] = Math.max(0, Math.min(room, g));
-    ms.entry = ''; ms.editingLot = null; paint();
-  };
-
-  return [
-    h('div', { class: 'mt-q' }, lot.supplier_name),
-    h('div', { class: 'mt-hint' },
-      `${f.rate(lot.rate_paise)} · ${f.qty(lot.available_g)} free · ${f.qty(Math.max(0, ms.qty_g - others))} still to assign`),
-    h('div', { class: 'mnum-value' },
-      h('b', {}, (ms.entry !== '' ? ms.entry : (live / MT || 0).toString()) + ' MT'),
-      h('small', {}, `${Math.round(live / 1000).toLocaleString('en-IN')} kg`)),
-    h('div', { class: 'mchips g2' },
-      h('button', { class: 'mchip', onclick: () => set(room) }, `Rest · ${f.qty(room)}`),
-      h('button', { class: 'mchip', onclick: () => set(0) }, 'None')),
-    numpad(3, () => set(Math.round(parseFloat(ms.entry || '0') * MT)), 'Set')
-  ];
-}
-
-// --------------------------------------------------------------- review
-function stepReview() {
-  const sell = ms.side === 'sell';
-  const cost = sell ? sellCost() : 0;
-  const marginRate = cost ? ms.rate_paise - cost : 0;
-  const margin = valuePaise(ms.qty_g, marginRate);
-
-  return [
-    h('div', { class: 'mt-q' }, sell ? 'Confirm the sale' : 'Confirm the purchase'),
-    h('div', { class: 'mt-hint' }, 'One tap to book. You can undo straight after.'),
-    h('div', { class: 'mrev' },
-      row('Sauda No.', ms.sauda_no || '—', editSauda),
-      row(sell ? 'Buyer' : 'Supplier', ms.party.name, () => jump('who')),
-      row('Material', ms.sku.display, () => jump('what')),
-      sell ? row('From', saleWarehouses() || 'no warehouse recorded')
-           : row('Warehouse', ms.warehouse || 'Not set', pickWarehouse),
-      row('Quantity', f.qty(ms.qty_g), () => jump('qty')),
-      row('Rate', f.rate(ms.rate_paise) + '/MT', () => jump('rate')),
-      row('GST', ms.plus_gst ? 'Extra' : 'Included', () => { ms.plus_gst = !ms.plus_gst; paint(); }),
-      row('Value', f.inr(valuePaise(ms.qty_g, ms.rate_paise))),
-      row('Date', f.date(ms.date), openTerms),
-      row('Payment due', ms.payment_due ? f.date(ms.payment_due) : 'Not set', openTerms),
-      row('Transport', termsSummary(), openTerms)),
-    sell && cost
-      ? h('div', { class: 'mlive ' + (margin >= 0 ? 'good' : 'bad') },
-          h('div', { class: 'mlive-top' },
-            h('b', { class: 'num ' + (margin >= 0 ? 'up' : 'down') }, f.inr(margin, { sign: true })),
-            h('span', { class: 'num ' + (margin >= 0 ? 'up' : 'down') }, f.rateDelta(marginRate) + '/MT')),
-          h('div', { class: 'mlive-sub' }, `bought at ${f.rate(cost)}/MT, selling at ${f.rate(ms.rate_paise)}/MT`))
-      : null,
-    ms.error ? h('div', { class: 'need' }, ms.error) : null
-  ];
-}
-
-// Transport, payment and e-way are recorded, never calculated, so they sit
-// behind one tap on the last screen instead of adding a step to every deal.
-function termsSummary() {
-  const t = ms.terms;
-  const bits = [];
-  if (t.transporter) bits.push(t.transporter);
-  if (t.freight_by) bits.push(`freight: ${t.freight_by}`);
-  if (t.delivery_by) bits.push(`delivery: ${t.delivery_by}`);
-  if (t.payment_terms) bits.push(t.payment_terms);
-  if (t.eway) bits.push(`e-way: ${t.eway}`);
-  if (t.remarks) bits.push(t.remarks);
-  if (ms.ex_place) bits.unshift(`Ex-${ms.ex_place}`);
-  return bits.length ? bits.join(' · ') : 'Not set';
-}
-
-function openTerms() {
-  const t = ms.terms;
-  const credit = [['Today', 0], ['+7d', 7], ['+15d', 15], ['+30d', 30], ['+45d', 45]];
-  sheet('Transport & payment', [
-    { key: 'date', label: 'Deal date', type: 'date', value: ms.date },
-    { key: 'payment_due', label: 'Payment due', type: 'date', value: ms.payment_due,
-      // counted from the deal date as it stands in this sheet, not as it was
-      chips: credit.map(([l, n]) => [l, get => addDays((get.date && get.date()) || ms.date, n)]) },
-    { key: 'ex_place', label: 'Ex-Place', value: ms.ex_place, placeholder: 'Mundra / Aslali / Other' },
-    { key: 'transporter', label: 'Transporter', value: t.transporter, placeholder: 'Ekta' },
-    { key: 'freight_by', label: 'Freight paid by', type: 'choice',
-      options: ['Buyer', 'Seller'], value: t.freight_by },
-    { key: 'delivery_by', label: 'Delivery by', type: 'choice',
-      options: ['Buyer', 'Seller'], value: t.delivery_by },
-    { key: 'payment_terms', label: 'Payment terms', value: t.payment_terms, placeholder: '30 days' },
-    { key: 'eway', label: 'E-way bill', value: t.eway, placeholder: 'ASL to buyer' },
-    { key: 'remarks', label: 'Note', value: t.remarks, placeholder: 'anything worth remembering' }
-  ], values => {
-    const dateChanged = values.date && values.date !== ms.date;
-    ms.date = values.date || ms.date;
-    ms.payment_due = values.payment_due || '';
-    ms.ex_place = values.ex_place || '';
-    delete values.date; delete values.payment_due; delete values.ex_place;
-    ms.terms = values;
-    if (dateChanged) refreshSauda(false);    // 1 April starts a new series
-    paint();
-  });
-}
-
-function editSauda() {
-  sheet('Sauda No.', [
-    { key: 'sauda', label: 'Sauda No.', value: ms.sauda_no, placeholder: 'LE/26-27/0001',
-      hint: 'Leave it blank to take the next number in this financial year.' }
-  ], async v => {
-    if (v.sauda) { ms.sauda_no = v.sauda; ms.saudaAuto = false; }
-    else await refreshSauda(true);
-    paint();
-  });
-}
-
-// Where a purchase lands. A sale needs no picker: it leaves from wherever the
-// lots it draws on are sitting, and the review shows which.
-function pickWarehouse() {
-  const names = ms.warehouses.map(w => w.name);
-  sheet('Warehouse', [
-    ...(names.length
-      ? [{ key: 'pick', label: 'Where will it sit?', type: 'choice', options: names, value: ms.warehouse }]
-      : []),
-    { key: 'add', label: names.length ? 'Or add a new one' : 'Warehouse name', placeholder: 'e.g. Mundra' }
-  ], async v => {
-    const added = (v.add || '').trim();
-    if (added) { await api.addWarehouse(added); await loadWarehouses(); }
-    ms.warehouse = added || v.pick || '';
-    if (ms.warehouse) rememberWarehouse(ms.warehouse);
-    paint();
-  });
-}
-
-function saleWarehouses() {
-  const open = ms.lots.filter(l => l.available_g > 0);
-  const used = open.length === 1 ? open : flow().rows.filter(r => r.take > 0).map(r => r.lot);
-  return [...new Set(used.map(l => l.warehouse).filter(Boolean))].join(', ');
-}
-
-function row(label, value, onEdit) {
-  return h('div', { class: 'mrev-row', onclick: onEdit },
-    h('span', {}, label), h('b', {}, value), onEdit ? h('em', {}, 'change') : null);
-}
-
-function jump(name) {
-  const i = steps().indexOf(name);
-  if (i >= 0) { ms.stepIndex = i; ms.entry = ''; loadStep(); paint(); }
-}
-
-// --------------------------------------------------------------- numpad
-function numpad(id, commit, label, opts = {}) {
-  const press = key => {
-    if (key === 'del') ms.entry = ms.entry.slice(0, -1);
-    else if (key === '.') { if (!ms.entry.includes('.')) ms.entry = (ms.entry || '0') + '.'; }
-    else ms.entry = (ms.entry === '0' ? '' : ms.entry) + key;
-    paint();
-  };
-  // Per-MT rates are whole rupees and usually end in zeros, so the rate pad
-  // swaps the decimal point for a double-zero key.
-  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', opts.noDot ? '00' : '.', '0'];
-  return h('div', { class: 'mpad', data: { pad: id } },
-    ...keys.map(k => h('button', { class: 'mkey', onclick: () => press(k) }, k)),
-    h('button', { class: 'mkey fn', onclick: () => press('del') }, '⌫'));
-}
-
-// --------------------------------------------------------------- footer
-function foot(step) {
-  if (step === 'who' || step === 'what') return null;
-
-  if (step === 'review') {
-    return h('div', { class: 'mt-foot' },
-      h('button', {
-        class: 'mt-next', disabled: !ready() || ms.busy, onclick: book
-      }, ms.busy ? 'Booking…' : (ms.side === 'sell' ? 'Book sale' : 'Book purchase')));
-  }
-
-  if (step === 'split') {
-    if (ms.editingLot) {
-      const lot = ms.lots.find(l => l.id === ms.editingLot);
-      const fl = flow();
-      const others = fl.assigned - (ms.alloc[lot.id] || 0);
-      const room = Math.min(lot.available_g, ms.qty_g - others);
-      return h('div', { class: 'mt-foot' },
-        h('button', { class: 'mt-skip', onclick: () => { ms.editingLot = null; ms.entry = ''; paint(); } }, 'Cancel'),
-        h('button', {
-          class: 'mt-next',
-          onclick: () => {
-            const v = ms.entry !== '' ? Math.round(parseFloat(ms.entry) * MT) : (ms.alloc[lot.id] || 0);
-            ms.alloc[lot.id] = Math.max(0, Math.min(room, v));
-            ms.entry = ''; ms.editingLot = null; paint();
-          }
-        }, 'Set amount'));
-    }
-    return h('div', { class: 'mt-foot' },
-      h('button', { class: 'mt-next', disabled: flow().left !== 0, onclick: next },
-        flow().left === 0 ? 'Review' : `${f.qty(Math.abs(flow().left))} ${flow().left < 0 ? 'too much' : 'to assign'}`));
-  }
-
-  // qty and rate
-  const value = step === 'qty'
-    ? (ms.entry !== '' ? Math.round(parseFloat(ms.entry || '0') * MT) : ms.qty_g)
-    : (ms.entry !== '' ? f.fromPerMt(Number(ms.entry)) : ms.rate_paise);
-
-  return h('div', { class: 'mt-foot' },
-    h('button', {
-      class: 'mt-next', disabled: !(value > 0),
-      onclick: () => {
-        if (step === 'qty') {
-          const stock = ms.side === 'sell' && ms.position ? ms.position.stock_g : 0;
-          ms.qty_g = stock ? Math.min(value, stock) : value;
-          autoIfSingle();
-        } else {
-          ms.rate_paise = value;
+  let open = null;
+  card.onclick = async e => {
+    if (e.target.closest('button')) return;
+    if (open) { open.remove(); open = null; return; }
+    const full = await api.deal(d.id);
+    const lines = sell ? full.allocations : full.sold;
+    const costs = lines.map(a => a.cost_paise);
+    const lo = Math.min(...costs), hi = Math.max(...costs);
+    open = h('div', { class: 'mdeal-more' },
+      h('div', { class: 'mdeal-grid wide' },
+        cell('GST', full.plus_gst ? 'Extra' : 'Included'),
+        cell('Value', f.inr(full.value_paise, { compact: true })),
+        cell('Payment due', full.payment_due ? f.date(full.payment_due) : ''),
+        cell('Ex-Place', full.ex_place),
+        cell('Transporter', full.transporter_name),
+        cell('Freight by', full.freight_by),
+        cell('Payment terms', full.payment_terms),
+        cell('E-way bill', full.eway),
+        full.remarks ? cell('Note', full.remarks) : null,
+        full.party_gstin ? cell('GSTIN', full.party_gstin) : null),
+      lines.length ? fanDiagram(
+        lines.map(a => ({
+          qty: a.qty_g, color: sell ? costShade(a.cost_paise, lo, hi) : 'hsl(214 60% 55%)',
+          good: a.margin_paise >= 0, short: f.qty(a.qty_g, { short: true }),
+          label: sell ? `${a.supplier_name} @ ${f.rate(a.cost_paise)} · ${a.warehouse}` : `${a.customer_name} @ ${f.rate(a.sale_rate_paise)}`
+        })),
+        { qty: full.qty_g, short: `${full.party_name} · ${f.qty(full.qty_g)}` },
+        { targetColor: sell ? 'var(--up)' : 'var(--accent)' }) : h('div', { class: 'mflow-empty' },
+          sell ? 'Nothing allocated.' : 'None of this purchase sold yet.'),
+      full.status === 'booked' ? h('button', {
+        class: 'mmore', style: { marginTop: '10px' },
+        onclick: async () => {
+          if (!window.confirm(`Cancel ${full.ref}?`)) return;
+          try { await api.cancel(full.id); toast('Cancelled ' + full.ref); reload(); ctx.refresh(); }
+          catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
         }
-        next();
-      }
-    }, 'Next'));
+      }, 'Cancel this deal') : null);
+    card.appendChild(open);
+  };
+  return card;
 }
 
-// --------------------------------------------------------------- commit
-async function book() {
-  if (!ready() || ms.busy) return;
-  ms.busy = true; ms.error = ''; paint();
-  const sell = ms.side === 'sell';
-  try {
-    const deal = await api.createDeal({
-      side: ms.side,
-      party_id: ms.party.id || undefined,
-      party_name: ms.party.id ? undefined : ms.party.name,
-      sku_id: ms.sku.id || undefined,
-      material: ms.line.material || undefined,
-      grade: ms.line.grade || undefined,
-      manufacturer: ms.line.manufacturer || undefined,
-      qty_g: ms.qty_g,
-      rate_paise: ms.rate_paise,
-      deal_date: ms.date,
-      sauda_no: (ms.sauda_no || '').trim() || undefined,
-      warehouse: ms.side === 'buy' ? (ms.warehouse || undefined) : undefined,
-      plus_gst: !!ms.plus_gst,
-      payment_due: ms.payment_due || undefined,
-      ex_place: (ms.ex_place || '').trim() || undefined,
-      transporter: ms.terms.transporter || undefined,
-      freight_by: ms.terms.freight_by || undefined,
-      delivery_by: ms.terms.delivery_by || undefined,
-      payment_terms: ms.terms.payment_terms || undefined,
-      eway: ms.terms.eway || undefined,
-      remarks: ms.terms.remarks || undefined,
-      pins: effectiveAlloc() || undefined,
-      allow_short: false,
-      confirm: true
-    });
-    celebrate(sell, deal);
-    closeTicket();
-    toast(sell
-      ? `Sold ${f.qty(deal.qty_g)} to ${deal.party_name}`
-      : `Bought ${f.qty(deal.qty_g)} from ${deal.party_name}`,
-      { action: async () => { await api.undo(); toast('Reversed'); ctx.refresh(); } });
-    ctx.refresh();
-  } catch (err) {
-    ms.busy = false; ms.error = err.message; paint();
+// ==================================================================== setup
+const SETUP_TABS = [['parties', 'Parties'], ['products', 'Products'], ['warehouses', 'Warehouses'],
+                    ['materials', 'Materials'], ['manufacturers', 'Makers'], ['states', 'States']];
+
+export function renderMobileSetup(root, appCtx) {
+  ctx = appCtx || ctx;
+  const tab = ctx.setupTab || 'parties';
+  const again = () => renderMobileSetup(root, ctx);
+  const cfg = MSETUP[tab];
+  let query = '';
+  const count = countEl();
+  const list = pagedList({ pageSize: 20, load: p => cfg.load({ ...p, ...(cfg.extra ? cfg.extra() : {}) }), onPage: count.update,
+    row: item => cfg.card(item, () => list.reload()),
+    empty: () => h('div', { class: 'empty small' }, query ? `Nothing matches "${query}"` : 'Nothing here yet') });
+
+  mount(root, h('div', { class: 'view' },
+    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
+      h('div', { class: 'mchips g3 filter', style: { padding: '0 0 10px' } },
+        ...SETUP_TABS.map(([key, text]) => h('button', {
+          class: 'mchip' + (tab === key ? ' on' : ''), onclick: () => { ctx.setupTab = key; ctx.setupFilter = null; again(); }
+        }, text))),
+      cfg.add ? h('button', { class: 'mmore', style: { marginBottom: '10px' },
+        onclick: async () => { if (await cfg.add()) list.reload(); } }, cfg.addLabel) : null,
+      msearch(cfg.placeholder, q => { query = q; list.reload({ q }); }),
+      ctx.setupFilter && tab === 'parties'
+        ? h('button', { class: 'mmore', style: { marginBottom: '10px' }, onclick: () => { ctx.setupFilter = null; again(); } },
+            `State ${ctx.setupFilter} only · show all`) : null),
+    h('div', { class: 'mflow' }, label(cfg.title, count), list.el)));
+  list.reload({});
+}
+
+const x = (labelText, call, again) => h('button', { class: 'msetup-x', onclick: e => { e.stopPropagation(); removeRecord(labelText, call, again); } }, '×');
+const card = (onTap, title, sub, right, extra, xBtn) => h('div', { class: 'mflow-card' },
+  h('div', { class: 'mflow-head' },
+    h('div', { class: 'grow', onclick: onTap }, h('b', {}, title), sub ? h('span', {}, sub) : null),
+    right ? h('div', { class: 'mflow-money' }, right) : null,
+    xBtn || null),
+  extra || null);
+
+const MSETUP = {
+  parties: {
+    title: 'Parties', addLabel: '+ Add party', add: () => partyForm(), placeholder: 'Name, GSTIN, phone',
+    load: p => api.parties(p), extra: () => (ctx.setupFilter ? { state_code: ctx.setupFilter } : {}),
+    card: (p, again) => card(async () => { if (await partyForm(p)) again(); }, p.name, partySub(p),
+      h('b', { class: 'num' }, p.deal_count || '—'),
+      p.address ? h('div', { class: 'mparty-addr' }, p.address) : null,
+      x(p.name, () => api.partyRemove(p.id), again))
+  },
+  products: {
+    title: 'Products', addLabel: '+ Add product', add: () => productForm(), placeholder: 'Material, grade, maker',
+    load: p => api.products(p),
+    card: (p, again) => card(async () => { if (await productForm(await api.product(p.id))) again(); },
+      p.display, p.packing || (p.deal_count ? `${p.deal_count} deals` : 'never traded'),
+      h('b', { class: 'num' }, p.stock_g ? f.qty(p.stock_g) : '—'), null,
+      x(p.display, () => api.productRemove(p.id), again))
+  },
+  warehouses: {
+    title: 'Warehouses', addLabel: '+ Add warehouse', add: () => warehouseForm(), placeholder: 'Name or address',
+    load: p => api.warehouses(p),
+    card: (w, again) => card(async () => { if (await warehouseForm(w)) again(); }, w.name, w.address || 'no address',
+      h('b', { class: 'num' }, f.qty(w.stock_g)), null, x(w.name, () => api.warehouseRemove(w.id), again))
+  },
+  materials: {
+    title: 'Materials', addLabel: '+ Add material', placeholder: 'Material',
+    add: () => nameForm('Add material', '', 'e.g. LLDPE', v => api.materialSave({ name: v })),
+    load: p => api.materials(p),
+    card: (m, again) => {
+      const box = h('div', {});
+      const c = card(() => {
+        if (box.childNodes.length) { mount(box); return; }
+        const grades = pagedList({ pageSize: 20, load: p => api.grades({ ...p, material_id: m.id }),
+          row: g => h('div', { class: 'mflow-link' },
+            h('i', { style: { background: 'var(--accent)' } }),
+            h('span', { class: 'who', onclick: async () => {
+              if (await nameForm('Rename grade', g.name, '', v => api.gradeSave({ id: g.id, material_id: m.id, name: v }))) grades.reload();
+            } }, g.name),
+            h('span', { class: 'qty' }, g.stock_g ? f.qty(g.stock_g) : ''),
+            x(`${m.name} ${g.name}`, () => api.gradeRemove(g.id), () => grades.reload())) });
+        mount(box, h('div', { class: 'mflow-links' },
+          h('button', { class: 'mmore', onclick: async () => {
+            if (await nameForm(`Add grade to ${m.name}`, '', 'e.g. S65', v => api.gradeSave({ material_id: m.id, name: v }))) grades.reload();
+          } }, `+ ${m.name} grade`), grades.el));
+        grades.reload({});
+      }, m.name, `${m.grades} grade${m.grades === 1 ? '' : 's'} · ${m.products} product${m.products === 1 ? '' : 's'} · tap to open`,
+        h('b', { class: 'num' }, m.stock_g ? f.qty(m.stock_g) : '—'), box, x(m.name, () => api.materialRemove(m.id), again));
+      return c;
+    }
+  },
+  manufacturers: {
+    title: 'Manufacturers', addLabel: '+ Add manufacturer', placeholder: 'Manufacturer',
+    add: () => nameForm('Add manufacturer', '', 'e.g. Reliance', v => api.manufacturerSave({ name: v })),
+    load: p => api.manufacturers(p),
+    card: (k, again) => card(async () => {
+      if (await nameForm('Rename manufacturer', k.name, '', v => api.manufacturerSave({ id: k.id, name: v }))) again();
+    }, k.name, `${k.products} product${k.products === 1 ? '' : 's'} · tap to rename`,
+      h('b', { class: 'num' }, k.stock_g ? f.qty(k.stock_g) : '—'), null, x(k.name, () => api.manufacturerRemove(k.id), again))
+  },
+  states: {
+    title: 'States', placeholder: 'State or code', load: p => api.states({ ...p, limit: 50 }),
+    card: s => card(() => { if (s.parties) { ctx.setupTab = 'parties'; ctx.setupFilter = s.code; ctx.go('setup'); } },
+      s.name, `code ${s.code}`, h('b', { class: 'num' }, s.parties ? `${s.parties}` : '—'))
   }
-}
-
-function celebrate(sell, deal) {
-  const el = h('div', { class: 'mdone' },
-    h('div', {},
-      h('b', { class: sell ? 'up' : '' },
-        sell ? f.inr(deal.margin_paise || 0, { sign: true }) : f.qty(deal.qty_g)),
-      h('span', {}, `${deal.ref} · ${deal.party_name}`)));
-  document.body.appendChild(el);
-  if (navigator.vibrate) navigator.vibrate(18);
-  setTimeout(() => el.remove(), 1100);
-}
+};
 
 // ============================================================= visualisation
-// The desktop sankey could not survive a 390px screen sideways, but the thing
-// it actually communicated - proportion - can. Two pieces do that job here:
-//
-//   1. a stacked strip on every card, so the split is visible while scanning
-//   2. a converging fan you can open on one trade, drawn top-to-bottom so it
-//      grows the way a phone scrolls instead of the way it cannot
-//
-// Colour carries the same meanings as the desktop graph: cheap stock green
-// through to dear amber, and ribbons green or red by the margin they earned.
-
-// Cost is shaded along one hue, light for cheap through to dark for dear.
-// The desktop green-to-amber scale cannot be reused here: red and green mean
-// loss and profit everywhere else in the app, and two perfectly profitable
-// lots eighty paise apart should not read as one good and one bad.
+// Cost is shaded along one hue, light for cheap through to dark for dear: red
+// and green mean loss and profit everywhere else in the app.
 function costShade(rate, low, high) {
   if (!isFinite(low) || !isFinite(high) || high === low) return 'hsl(199 42% 46%)';
   const t = Math.max(0, Math.min(1, (rate - low) / (high - low)));
@@ -891,187 +434,122 @@ function costShade(rate, low, high) {
 function proportionBar(parts, opts = {}) {
   const total = parts.reduce((s, p) => s + p.qty, 0) || 1;
   return h('div', { class: 'mbar' + (opts.thin ? ' thin' : '') },
-    ...parts.map(p => h('i', {
-      style: { width: (p.qty / total * 100) + '%', background: p.color },
-      title: p.label
-    })));
+    ...parts.map(p => h('i', { style: { width: (p.qty / total * 100) + '%', background: p.color }, title: p.label })));
 }
 
-// One trade, its sources fanning into it. Sized to whatever width it is given,
-// so it can never be the thing that makes a page scroll sideways.
+// One trade, its sources fanning into it, drawn top-to-bottom.
 function fanDiagram(sources, target, opts = {}) {
   const W = 340, H = 186, BAND = 30, TOP = 10, BOT = H - BAND - 26;
-  const total = sources.reduce((s, x) => s + x.qty, 0) || 1;
+  const total = sources.reduce((s, x2) => s + x2.qty, 0) || 1;
   const targetQty = Math.max(total, target.qty || 0);
   const gap = sources.length > 1 ? 5 : 0;
   const usable = W - gap * (sources.length - 1);
-
-  let x = 0, tx = 0;
+  let xx = 0, tx = 0;
   const bands = [], ribbons = [], labels = [];
-
   for (const src of sources) {
     const w = Math.max(9, (src.qty / total) * usable);
     const tw = (src.qty / targetQty) * W;
-    bands.push(svg('rect', {
-      x, y: TOP, width: w, height: BAND, rx: 6, fill: src.color, 'fill-opacity': .95
-    }));
-    // ribbon from this source down to its slice of the trade
-    const x0 = x, x1 = x + w, t0 = tx, t1 = tx + tw, my = (TOP + BAND + BOT) / 2;
+    bands.push(svg('rect', { x: xx, y: TOP, width: w, height: BAND, rx: 6, fill: src.color, 'fill-opacity': .95 }));
+    const x0 = xx, x1 = xx + w, t0 = tx, t1 = tx + tw, my = (TOP + BAND + BOT) / 2;
     ribbons.push(svg('path', {
-      d: `M${x0},${TOP + BAND} C${x0},${my} ${t0},${my} ${t0},${BOT}
-          L${t1},${BOT} C${t1},${my} ${x1},${my} ${x1},${TOP + BAND} Z`,
+      d: `M${x0},${TOP + BAND} C${x0},${my} ${t0},${my} ${t0},${BOT} L${t1},${BOT} C${t1},${my} ${x1},${my} ${x1},${TOP + BAND} Z`,
       fill: src.good === false ? 'var(--down)' : 'var(--up)', 'fill-opacity': .22
     }));
-    if (w > 46) {
-      labels.push(svg('text', {
-        x: x + w / 2, y: TOP + BAND / 2 + 4, 'text-anchor': 'middle',
-        'font-size': 11, 'font-weight': 700, fill: '#fff'
-      }, src.short));
-    }
-    x += w + gap; tx += tw;
+    if (w > 46) labels.push(svg('text', { x: xx + w / 2, y: TOP + BAND / 2 + 4, 'text-anchor': 'middle',
+      'font-size': 11, 'font-weight': 700, fill: '#fff' }, src.short));
+    xx += w + gap; tx += tw;
   }
-
   const shortfall = targetQty > total ? ((targetQty - total) / targetQty) * W : 0;
   return h('div', { class: 'mfan' },
     svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'mfan-svg' },
       ...ribbons, ...bands, ...labels,
-      svg('rect', {
-        x: 0, y: BOT, width: W - shortfall, height: BAND, rx: 6,
-        fill: opts.targetColor || 'var(--ink)', 'fill-opacity': .88
-      }),
-      shortfall ? svg('rect', {
-        x: W - shortfall, y: BOT, width: shortfall, height: BAND, rx: 6,
-        fill: 'var(--down)', 'fill-opacity': .35
-      }) : null,
-      svg('text', {
-        x: W / 2, y: BOT + BAND / 2 + 4, 'text-anchor': 'middle',
-        'font-size': 11.5, 'font-weight': 700, fill: '#fff'
-      }, target.short)),
+      svg('rect', { x: 0, y: BOT, width: W - shortfall, height: BAND, rx: 6, fill: opts.targetColor || 'var(--ink)', 'fill-opacity': .88 }),
+      shortfall ? svg('rect', { x: W - shortfall, y: BOT, width: shortfall, height: BAND, rx: 6, fill: 'var(--down)', 'fill-opacity': .35 }) : null,
+      svg('text', { x: W / 2, y: BOT + BAND / 2 + 4, 'text-anchor': 'middle', 'font-size': 11.5, 'font-weight': 700, fill: '#fff' }, target.short)),
     h('div', { class: 'mfan-key' },
-      ...sources.map(src => h('span', {},
-        h('i', { style: { background: src.color } }), src.label)),
-      sources.length > 1
-        ? h('span', { class: 'mfan-note' }, 'lighter = cheaper stock')
-        : null));
+      ...sources.map(src => h('span', {}, h('i', { style: { background: src.color } }), src.label)),
+      sources.length > 1 ? h('span', { class: 'mfan-note' }, 'lighter = cheaper stock') : null));
 }
 
-// The whole window as one diagram: every purchase lot along the top, every
-// sale along the bottom, and a ribbon for each allocation between them. It is
-// the desktop sankey turned through ninety degrees - flowing top to bottom
-// instead of left to right - which is what lets it fit a phone. Width is
-// whatever it is given; only the height grows.
+// The whole window as one diagram: purchases along the top, sales along the
+// bottom, a ribbon per allocation. The desktop sankey turned ninety degrees.
 function overviewDiagram(graph, onPick) {
   const W = 358, BAND = 30, H = 300, TOP = 4, BOT = H - BAND - 4;
   const lots = graph.nodes.filter(n => n.kind === 'lot');
   const sales = graph.nodes.filter(n => n.kind === 'sale');
   if (!lots.length && !sales.length) return null;
-
   const rates = lots.map(n => n.rate_paise);
   const low = Math.min(...rates), high = Math.max(...rates);
   const lotTotal = lots.reduce((s, n) => s + n.qty_g, 0) || 1;
   const saleTotal = sales.reduce((s, n) => s + n.qty_g, 0) || 1;
-  // Both rows are drawn against the same scale. Stretching each to full width
-  // would make 72 MT sold look like all 169 MT bought.
   const scale = Math.max(lotTotal, saleTotal);
-
-  // Lay each row out proportionally, but never thinner than a fingertip.
   const place = (nodes, total) => {
     const MIN = 7, gap = 2;
     const room = (total / scale) * W - gap * Math.max(0, nodes.length - 1);
     const raw = nodes.map(n => (n.qty_g / total) * room);
     const lift = raw.reduce((s, w) => s + Math.max(0, MIN - w), 0);
     const shrinkable = raw.reduce((s, w) => s + Math.max(0, w - MIN), 0) || 1;
-    let x = 0;
+    let xx = 0;
     const map = new Map();
     nodes.forEach((n, i) => {
-      let w = raw[i] < MIN ? MIN : raw[i] - (raw[i] - MIN) * (lift / shrinkable);
-      map.set(n.id, { node: n, x, w, cursor: x });
-      x += w + gap;
+      const w = raw[i] < MIN ? MIN : raw[i] - (raw[i] - MIN) * (lift / shrinkable);
+      map.set(n.id, { node: n, x: xx, w, cursor: xx });
+      xx += w + gap;
     });
     return map;
   };
-
   const L = place(lots, lotTotal), S = place(sales, saleTotal);
   const soldPct = Math.round((saleTotal / lotTotal) * 100);
   const ribbons = [], bands = [];
-
   for (const e of graph.edges) {
     const a = L.get(e.source), b = S.get(e.target);
     if (!a || !b) continue;
-    const aw = (e.qty_g / a.node.qty_g) * a.w;
-    const bw = (e.qty_g / b.node.qty_g) * b.w;
+    const aw = (e.qty_g / a.node.qty_g) * a.w, bw = (e.qty_g / b.node.qty_g) * b.w;
     const x0 = a.cursor, x1 = a.cursor + aw, t0 = b.cursor, t1 = b.cursor + bw;
     a.cursor += aw; b.cursor += bw;
     const my = (TOP + BAND + BOT) / 2;
     ribbons.push(svg('path', {
-      class: 'movr', data: { lot: e.source, sale: e.target },
-      d: `M${x0},${TOP + BAND} C${x0},${my} ${t0},${my} ${t0},${BOT}
-          L${t1},${BOT} C${t1},${my} ${x1},${my} ${x1},${TOP + BAND} Z`,
+      d: `M${x0},${TOP + BAND} C${x0},${my} ${t0},${my} ${t0},${BOT} L${t1},${BOT} C${t1},${my} ${x1},${my} ${x1},${TOP + BAND} Z`,
       fill: e.margin_paise >= 0 ? 'var(--up)' : 'var(--down)', 'fill-opacity': .2
     }));
   }
-
-  for (const { node, x, w, cursor } of L.values()) {
-    const soldW = cursor - x;
-    bands.push(svg('rect', {
-      class: 'moband', data: { id: node.id }, x, y: TOP, width: w, height: BAND, rx: 5,
-      fill: costShade(node.rate_paise, low, high),
-      onclick: () => onPick({ kind: 'lot', node })
-    }));
-    if (soldW < w - 0.5) {
-      bands.push(svg('rect', {
-        x: x + soldW, y: TOP, width: w - soldW, height: BAND, rx: 5,
-        fill: 'var(--bg)', 'fill-opacity': .62, 'pointer-events': 'none'
-      }));
-    }
+  for (const { node, x: bx, w, cursor } of L.values()) {
+    const soldW = cursor - bx;
+    bands.push(svg('rect', { class: 'moband', x: bx, y: TOP, width: w, height: BAND, rx: 5,
+      fill: costShade(node.rate_paise, low, high), onclick: () => onPick({ kind: 'lot', node }) }));
+    if (soldW < w - 0.5) bands.push(svg('rect', { x: bx + soldW, y: TOP, width: w - soldW, height: BAND, rx: 5,
+      fill: 'var(--bg)', 'fill-opacity': .62, 'pointer-events': 'none' }));
   }
-
-  for (const { node, x, w, cursor } of S.values()) {
-    const covered = cursor - x;
-    bands.push(svg('rect', {
-      class: 'moband', data: { id: node.id }, x, y: BOT, width: w, height: BAND, rx: 5,
-      fill: 'var(--up)', 'fill-opacity': .85,
-      onclick: () => onPick({ kind: 'sale', node })
-    }));
-    if (covered < w - 0.5) {
-      bands.push(svg('rect', {
-        x: x + covered, y: BOT, width: w - covered, height: BAND, rx: 5,
-        fill: 'var(--down)', 'fill-opacity': .4, 'pointer-events': 'none'
-      }));
-    }
+  for (const { node, x: bx, w, cursor } of S.values()) {
+    const covered = cursor - bx;
+    bands.push(svg('rect', { class: 'moband', x: bx, y: BOT, width: w, height: BAND, rx: 5,
+      fill: 'var(--up)', 'fill-opacity': .85, onclick: () => onPick({ kind: 'sale', node }) }));
+    if (covered < w - 0.5) bands.push(svg('rect', { x: bx + covered, y: BOT, width: w - covered, height: BAND, rx: 5,
+      fill: 'var(--down)', 'fill-opacity': .4, 'pointer-events': 'none' }));
   }
-
   return h('div', { class: 'moview' },
-    h('div', { class: 'moview-side' },
-      h('span', {}, 'BOUGHT'), h('b', { class: 'num' }, f.qty(lotTotal))),
+    h('div', { class: 'moview-side' }, h('span', {}, 'BOUGHT'), h('b', { class: 'num' }, f.qty(lotTotal))),
     svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'moview-svg' }, ...ribbons, ...bands),
     h('div', { class: 'moview-side bottom' },
-      h('span', {}, 'SOLD'), h('b', { class: 'num' }, f.qty(saleTotal)),
-      h('em', {}, `${soldPct}% of what was bought`)));
+      h('span', {}, 'SOLD'), h('b', { class: 'num' }, f.qty(saleTotal)), h('em', {}, `${soldPct}% of what was bought`)));
 }
 
 // ===================================================================== flow
-// The lineage, told downwards. Each sale carries the lots it came from; each
-// purchase still holding stock says where the rest of it went. Same data as the
-// sankey on desktop, none of the dragging.
 const RANGES = [['7d', 7], ['30d', 30], ['90d', 90], ['All', 0]];
-
-function shiftDays(days) {
+function daysAgo(days) {
   const d = new Date(); d.setDate(d.getDate() - days);
   const p = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 export async function renderMobileFlow(root, appCtx) {
-  ctx = appCtx;
+  ctx = appCtx || ctx;
   if (ctx.flowDays === undefined) ctx.flowDays = 30;
-  const from = ctx.flowDays ? shiftDays(ctx.flowDays) : undefined;
-
+  const from = ctx.flowDays ? daysAgo(ctx.flowDays) : undefined;
   const [graph, posPage] = await Promise.all([
-    api.graph({ sku_id: ctx.skuFilter || undefined, date_from: from, limit: 40 }),
+    api.graph({ product_id: ctx.productFilter || undefined, date_from: from, limit: 40 }),
     api.positions({ limit: 60 })
   ]);
-
   const lots = new Map();
   for (const n of graph.nodes) if (n.kind === 'lot') lots.set(n.id, n);
   const sales = graph.nodes.filter(n => n.kind === 'sale').reverse();
@@ -1082,74 +560,49 @@ export async function renderMobileFlow(root, appCtx) {
     if (!byLot.has(e.source)) byLot.set(e.source, []);
     byLot.get(e.source).push(e);
   }
-  const idle = graph.nodes
-    .filter(n => n.kind === 'lot' && n.remaining_g > 0)
-    .sort((a, b) => b.remaining_g - a.remaining_g);
+  const idle = graph.nodes.filter(n => n.kind === 'lot' && n.remaining_g > 0).sort((a, b) => b.remaining_g - a.remaining_g);
 
   mount(root, h('div', { class: 'view' },
     h('div', { class: 'mflow', style: { paddingTop: '14px' } },
       h('div', { class: 'mchips g4 filter', style: { padding: '0 0 10px' } },
-        ...RANGES.map(([label, days]) => h('button', {
-          class: 'mchip' + (ctx.flowDays === days ? ' on' : ''),
-          onclick: () => { ctx.flowDays = days; renderMobileFlow(root, ctx); }
-        }, label))),
-      h('select', {
-        class: 'mselect',
-        onchange: e => {
-          ctx.skuFilter = e.target.value ? +e.target.value : null;
-          renderMobileFlow(root, ctx);
-        }
-      },
-        h('option', { value: '' }, 'All materials'),
-        ...posPage.positions.map(p => h('option', {
-          value: p.sku_id, selected: ctx.skuFilter === p.sku_id || undefined
-        }, `${p.material} — ${f.qty(p.stock_g)}`)))),
-
+        ...RANGES.map(([text, days]) => h('button', {
+          class: 'mchip' + (ctx.flowDays === days ? ' on' : ''), onclick: () => { ctx.flowDays = days; renderMobileFlow(root, ctx); }
+        }, text))),
+      h('select', { class: 'mselect', onchange: e => { ctx.productFilter = e.target.value ? +e.target.value : null; renderMobileFlow(root, ctx); } },
+        h('option', { value: '' }, 'All products'),
+        ...posPage.items.map(p => h('option', { value: p.product_id, selected: ctx.productFilter === p.product_id || undefined },
+          `${p.product} — ${f.qty(p.stock_g)}`)))),
     h('div', { class: 'mflow' },
       overviewDiagram(graph, sel => {
         const box = document.getElementById('mo-detail');
         if (!box) return;
         const n = sel.node;
-        mount(box, sel.kind === 'lot'
-          ? h('div', { class: 'mo-detail' },
-              h('b', {}, `${n.party} · ${f.qty(n.qty_g)} @ ${f.rate(n.rate_paise)}`),
-              h('span', {}, `${n.material} · ${n.deal_ref} · ${f.date(n.date)} · ` +
-                `${f.qty(n.remaining_g)} still in stock`))
-          : h('div', { class: 'mo-detail' },
-              h('b', {}, `${n.party} · ${f.qty(n.qty_g)} @ ${f.rate(n.rate_paise)}`),
-              h('span', {}, `${n.material} · ${n.deal_ref} · ${f.date(n.date)}`)));
+        mount(box, h('div', { class: 'mo-detail' },
+          h('b', {}, `${n.party} · ${f.qty(n.qty_g)} @ ${f.rate(n.rate_paise)}`),
+          h('span', {}, `${n.product} · ${n.deal_ref} · ${f.date(n.date)}${n.warehouse ? ' · ' + n.warehouse : ''}` +
+            (sel.kind === 'lot' ? ` · ${f.qty(n.remaining_g)} still in stock` : ''))));
       }),
-      h('div', { id: 'mo-detail' },
-        h('div', { class: 'mo-detail hint' },
-          h('span', {}, 'Each block is a trade, sized by quantity. Tap one to name it.'))),
+      h('div', { id: 'mo-detail' }, h('div', { class: 'mo-detail hint' }, h('span', {}, 'Each block is a trade, sized by quantity. Tap one to name it.'))),
       h('div', { class: 'mo-key' },
         h('span', {}, h('i', { style: { background: 'hsl(202 38% 62%)' } }), 'cheap stock'),
         h('span', {}, h('i', { style: { background: 'hsl(192 54% 34%)' } }), 'dear stock'),
         h('span', {}, h('i', { style: { background: 'var(--up)', opacity: .3 } }), 'profitable flow'),
         h('span', {}, h('i', { style: { background: 'var(--bg)', border: '1px solid var(--line-2)' } }), 'unsold'))),
-
-    h('div', { class: 'mlabel', style: { padding: '0 14px' } }, 'Sale by sale',
-      h('span', {}, graph.truncated ? `newest ${sales.length} of ${graph.sales_total}` : `${sales.length} in range`)),
+    label('Sale by sale', h('span', {}, graph.truncated ? `newest ${sales.length} of ${graph.sales_total}` : `${sales.length} in range`)),
     h('div', { class: 'mflow' },
       ...sales.map(sale => {
         const sources = bySale.get(sale.id) || [];
         const margin = sources.reduce((s, e) => s + e.margin_paise, 0);
         const costs = sources.map(e => e.cost_paise);
         const low = Math.min(...costs), high = Math.max(...costs);
-        const parts = sources.map(e => ({
-          qty: e.qty_g, color: costShade(e.cost_paise, low, high),
-          label: (lots.get(e.source) || {}).party || ''
-        }));
+        const parts = sources.map(e => ({ qty: e.qty_g, color: costShade(e.cost_paise, low, high), label: (lots.get(e.source) || {}).party || '' }));
         if (sale.uncovered_g) parts.push({ qty: sale.uncovered_g, color: 'var(--down)', label: 'uncovered' });
-        const card = h('div', { class: 'mflow-card' },
+        const c = h('div', { class: 'mflow-card' },
           h('div', { class: 'mflow-head' },
             h('span', { class: 'mflow-side sell' }, 'SOLD'),
-            h('div', { class: 'grow' },
-              h('b', {}, sale.party),
-              h('span', {}, `${f.date(sale.date)} · ${sale.material}`)),
+            h('div', { class: 'grow' }, h('b', {}, sale.party), h('span', {}, `${f.date(sale.date)} · ${sale.product}${sale.warehouse ? ' · ' + sale.warehouse : ''}`)),
             h('div', { class: 'mflow-money' },
-              h('b', { class: 'num ' + (margin >= 0 ? 'up' : 'down') },
-                f.inr(margin, { sign: true, compact: true })),
+              h('b', { class: 'num ' + (margin >= 0 ? 'up' : 'down') }, f.inr(margin, { sign: true, compact: true })),
               h('span', { class: 'num' }, `${f.qty(sale.qty_g)} @ ${f.rate(sale.rate_paise)}`))),
           h('div', { class: 'mflow-links' },
             ...sources.map(e => {
@@ -1158,482 +611,37 @@ export async function renderMobileFlow(root, appCtx) {
                 h('i', { style: { background: e.margin_paise >= 0 ? 'var(--up)' : 'var(--down)' } }),
                 h('span', { class: 'qty' }, f.qty(e.qty_g)),
                 h('span', { class: 'who' }, `from ${lot.party || '—'} @ ${f.rate(e.cost_paise)}`),
-                h('span', { class: 'pl ' + (e.margin_paise >= 0 ? 'up' : 'down') },
-                  f.rateDelta(e.margin_rate_paise)));
+                h('span', { class: 'pl ' + (e.margin_paise >= 0 ? 'up' : 'down') }, f.rateDelta(e.margin_rate_paise)));
             }),
-            sale.uncovered_g
-              ? h('div', { class: 'mflow-link down' },
-                  h('i', { style: { background: 'var(--down)' } }),
-                  h('span', { class: 'qty' }, f.qty(sale.uncovered_g)),
-                  h('span', { class: 'who' }, 'uncovered'))
-              : null,
             sources.length ? null : h('div', { class: 'mflow-empty' }, 'No stock allocated.')));
-
-        // The strip is always visible; the fan opens on demand so a long list
-        // stays scannable.
+        if (parts.length > 1) c.insertBefore(proportionBar(parts), c.querySelector('.mflow-links'));
         if (parts.length) {
-          if (parts.length > 1) card.insertBefore(proportionBar(parts), card.querySelector('.mflow-links'));
-          card.onclick = () => {
-            const open = card.querySelector('.mfan');
+          c.onclick = () => {
+            const open = c.querySelector('.mfan');
             if (open) { open.remove(); return; }
-            card.appendChild(fanDiagram(
-              sources.map(e => {
-                const lot = lots.get(e.source) || {};
-                return {
-                  qty: e.qty_g, color: costShade(e.cost_paise, low, high),
-                  good: e.margin_paise >= 0,
-                  short: f.qty(e.qty_g, { short: true }),
-                  label: `${lot.party || '—'} @ ${f.rate(e.cost_paise)}`
-                };
-              }),
-              { qty: sale.qty_g, short: `${sale.party} · ${f.qty(sale.qty_g)} @ ${f.rate(sale.rate_paise)}` },
-              { targetColor: 'var(--up)' }));
+            c.appendChild(fanDiagram(sources.map(e => {
+              const lot = lots.get(e.source) || {};
+              return { qty: e.qty_g, color: costShade(e.cost_paise, low, high), good: e.margin_paise >= 0,
+                       short: f.qty(e.qty_g, { short: true }), label: `${lot.party || '—'} @ ${f.rate(e.cost_paise)}` };
+            }), { qty: sale.qty_g, short: `${sale.party} · ${f.qty(sale.qty_g)} @ ${f.rate(sale.rate_paise)}` }, { targetColor: 'var(--up)' }));
           };
         }
-        return card;
+        return c;
       }),
-      sales.length ? null : h('div', { class: 'empty' },
-        h('h3', {}, 'No sales in this window'), h('div', {}, 'Try a longer range.'))),
-
+      sales.length ? null : h('div', { class: 'empty' }, h('h3', {}, 'No sales in this window'), h('div', {}, 'Try a longer range.'))),
     idle.length ? [
-      h('div', { class: 'mlabel', style: { padding: '0 14px' } }, 'Still in stock'),
+      label('Still in stock'),
       h('div', { class: 'mflow' }, ...idle.slice(0, 20).map(lot => {
         const gone = byLot.get(lot.id) || [];
-        const gonePart = gone.map(e => ({
-          qty: e.qty_g, color: e.margin_paise >= 0 ? 'var(--up)' : 'var(--down)', label: 'sold'
-        }));
-        gonePart.push({ qty: lot.remaining_g, color: 'var(--line-2)', label: 'in stock' });
+        const goneParts = gone.map(e => ({ qty: e.qty_g, color: e.margin_paise >= 0 ? 'var(--up)' : 'var(--down)', label: 'sold' }));
+        goneParts.push({ qty: lot.remaining_g, color: 'var(--line-2)', label: 'in stock' });
         return h('div', { class: 'mflow-card' },
           h('div', { class: 'mflow-head' },
             h('span', { class: 'mflow-side lot' }, 'HELD'),
-            h('div', { class: 'grow' },
-              h('b', {}, lot.party),
-              h('span', {}, `${f.date(lot.date)} · ${lot.material}`)),
-            h('div', { class: 'mflow-money' },
-              h('b', { class: 'num' }, f.qty(lot.remaining_g)),
+            h('div', { class: 'grow' }, h('b', {}, lot.party), h('span', {}, `${f.date(lot.date)} · ${lot.product}`)),
+            h('div', { class: 'mflow-money' }, h('b', { class: 'num' }, f.qty(lot.remaining_g)),
               h('span', { class: 'num' }, `of ${f.qty(lot.qty_g)} @ ${f.rate(lot.rate_paise)}`))),
-          gonePart.length > 1 ? proportionBar(gonePart, { thin: true }) : null,
-          gone.length
-            ? h('div', { class: 'mflow-links' }, ...gone.map(e => h('div', { class: 'mflow-link' },
-                h('i', { style: { background: 'var(--line-2)' } }),
-                h('span', { class: 'qty' }, f.qty(e.qty_g)),
-                h('span', { class: 'who' }, 'sold on'),
-                h('span', { class: 'pl ' + (e.margin_paise >= 0 ? 'up' : 'down') },
-                  f.inr(e.margin_paise, { sign: true, compact: true })))))
-            : null);
+          goneParts.length > 1 ? proportionBar(goneParts, { thin: true }) : null);
       }))
     ] : null));
-}
-
-// ===================================================================== tape
-export async function renderMobileTape(root, appCtx) {
-  ctx = appCtx;
-  const state = { q: '', side: '', rows: [], matched: 0, open: null };
-
-  const list = h('div', { class: 'mflow' });
-  const more = h('button', { class: 'mmore', onclick: loadMore }, 'Load more');
-  const count = h('span', {}, '');
-
-  async function reload() {
-    const page = await api.tape({ limit: 20, q: state.q, side: state.side || undefined });
-    state.rows = page.deals; state.matched = page.matched; paintList();
-  }
-  async function loadMore() {
-    const page = await api.tape({ limit: 20, offset: state.rows.length, q: state.q, side: state.side || undefined });
-    state.rows = state.rows.concat(page.deals); state.matched = page.matched; paintList();
-  }
-
-  function paintList() {
-    count.textContent = `${state.rows.length} of ${state.matched}`;
-    more.hidden = state.rows.length >= state.matched;
-    mount(list, ...state.rows.map(d => dealCard(d)), more);
-    if (!state.rows.length) mount(list, h('div', { class: 'empty' }, h('h3', {}, 'No deals')));
-  }
-
-  function dealCard(d) {
-    const sell = d.side === 'sell';
-    const card = h('div', { class: 'mflow-card' + (d.status === 'cancelled' ? ' off' : '') },
-      h('div', { class: 'mflow-head' },
-        h('span', { class: 'mflow-side ' + (sell ? 'sell' : 'lot') }, sell ? 'SOLD' : 'BOUGHT'),
-        h('div', { class: 'grow' },
-          h('b', {}, d.party_name),
-          h('span', {}, `${f.date(d.deal_date)} · ${d.material}`)),
-        h('div', { class: 'mflow-money' },
-          sell
-            ? h('b', { class: 'num ' + (d.margin_paise >= 0 ? 'up' : 'down') },
-                f.inr(d.margin_paise, { sign: true, compact: true }))
-            : h('b', { class: 'num' }, f.inr(d.value_paise, { compact: true })),
-          h('span', { class: 'num' }, `${f.qty(d.qty_g)} @ ${f.rate(d.rate_paise)}`))));
-    card.onclick = async () => {
-      if (card.dataset.open) { card.querySelector('.mflow-links').remove(); delete card.dataset.open; return; }
-      const full = await api.deal(d.id);
-      const lines = sell ? full.allocations : full.sold;
-      const costs = lines.map(a => a.cost_paise);
-      const lo = Math.min(...costs), hi = Math.max(...costs);
-      if (lines.length) {
-        card.appendChild(fanDiagram(
-          lines.map(a => ({
-            qty: a.qty_g,
-            color: sell ? costShade(a.cost_paise, lo, hi) : 'hsl(214 60% 55%)',
-            good: a.margin_paise >= 0,
-            short: f.qty(a.qty_g, { short: true }),
-            label: sell ? `${a.supplier_name} @ ${f.rate(a.cost_paise)}`
-                        : `${a.customer_name} @ ${f.rate(a.sale_rate_paise)}`
-          })),
-          { qty: full.qty_g, short: `${full.party_name} · ${f.qty(full.qty_g)}` },
-          { targetColor: sell ? 'var(--up)' : 'var(--accent)' }));
-      }
-      card.appendChild(h('div', { class: 'mdeal-meta' },
-        ...[full.ref, full.warehouse, full.payment_due ? `due ${f.date(full.payment_due)}` : null,
-            full.plus_gst ? 'GST extra' : 'GST included', full.ex_place ? `Ex-${full.ex_place}` : null]
-          .filter(Boolean).map(x => h('span', {}, x))));
-      card.appendChild(h('div', { class: 'mflow-links' },
-        ...lines.map(a => h('div', { class: 'mflow-link' },
-          h('i', { style: { background: a.margin_paise >= 0 ? 'var(--up)' : 'var(--down)' } }),
-          h('span', { class: 'qty' }, f.qty(a.qty_g)),
-          h('span', { class: 'who' }, sell
-            ? `from ${a.supplier_name} @ ${f.rate(a.cost_paise)}`
-            : `to ${a.customer_name} @ ${f.rate(a.sale_rate_paise)}`),
-          h('span', { class: 'pl ' + (a.margin_paise >= 0 ? 'up' : 'down') },
-            f.inr(a.margin_paise, { sign: true, compact: true })))),
-        lines.length ? null : h('div', { class: 'mflow-empty' },
-          sell ? 'Nothing allocated.' : 'None of this lot sold yet.'),
-        full.status === 'booked'
-          ? h('button', {
-              class: 'mmore', style: { marginTop: '10px' },
-              onclick: async e => {
-                e.stopPropagation();
-                if (!window.confirm(`Cancel ${full.ref}?`)) return;
-                try { await api.cancel(full.id); toast('Cancelled ' + full.ref); reload(); ctx.refresh(); }
-                catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
-              }
-            }, 'Cancel this deal')
-          : null));
-      card.dataset.open = '1';
-    };
-    return card;
-  }
-
-  mount(root, h('div', { class: 'view' },
-    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
-      h('div', { class: 'msearch', style: { marginBottom: '10px' } },
-        h('span', { class: 'dim' }, '⌕'),
-        h('input', {
-          placeholder: 'Party, material, deal ref', value: state.q,
-          oninput: e => { state.q = e.target.value; clearTimeout(state.t); state.t = setTimeout(reload, 250); }
-        })),
-      h('div', { class: 'mchips g3 filter', style: { padding: '0 0 4px' } },
-        ...[['', 'All'], ['buy', 'Bought'], ['sell', 'Sold']].map(([v, label]) => h('button', {
-          class: 'mchip' + (state.side === v ? ' on' : ''),
-          onclick: () => { state.side = v; reload(); }
-        }, label)))),
-    h('div', { class: 'mlabel', style: { padding: '0 14px' } }, 'Trades', count),
-    list));
-  reload();
-}
-
-// ================================================================== position
-export async function renderMobilePosition(root, skuId, appCtx) {
-  ctx = appCtx;
-  const p = await api.position(skuId);
-  const lots = p.lots.filter(l => l.available_g > 0);
-
-  mount(root, h('div', { class: 'view' },
-    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
-      h('button', { class: 'mmore', style: { marginBottom: '12px' }, onclick: () => ctx.go('desk') },
-        '‹ Back to desk'),
-      h('div', { class: 'mpos-hero' },
-        h('b', {}, p.sku.display),
-        h('div', { class: 'mpos-hero-row' },
-          heroStat('In stock', f.qty(p.stock_g)),
-          heroStat('Avg cost', f.rate(p.cost_paise)),
-          heroStat('Mark', p.mark_paise ? f.rate(p.mark_paise) : '—'),
-          heroStat('Open P&L', f.inr(p.unrealised_paise, { sign: true, compact: true }),
-            p.unrealised_paise >= 0 ? 'up' : 'down'))),
-      h('button', {
-        class: 'dock-btn sell', style: { marginTop: '12px', width: '100%' },
-        onclick: () => startTicket('sell', { sku_id: skuId, material: p.sku.display })
-      }, '↑ Sell from this position')),
-
-    h('div', { class: 'mlabel', style: { padding: '0 14px' } }, 'Lots', h('span', {}, `${lots.length} open`)),
-    h('div', { class: 'mflow' }, ...p.lots.map(lot => h('div', { class: 'mflow-card' },
-      h('div', { class: 'mflow-head' },
-        h('span', { class: 'mflow-side lot' }, f.rate(lot.rate_paise)),
-        h('div', { class: 'grow' },
-          h('b', {}, lot.supplier_name),
-          h('span', {}, `${lot.deal_ref} · ${f.date(lot.deal_date)}`)),
-        h('div', { class: 'mflow-money' },
-          h('b', { class: 'num' }, f.qty(lot.available_g)),
-          h('span', { class: 'num' }, `of ${f.qty(lot.qty_g)}`))),
-      lot.outflows && lot.outflows.length
-        ? h('div', { class: 'mflow-links' }, ...lot.outflows.map(o => h('div', { class: 'mflow-link' },
-            h('i', { style: { background: o.margin_paise >= 0 ? 'var(--up)' : 'var(--down)' } }),
-            h('span', { class: 'qty' }, f.qty(o.qty_g)),
-            h('span', { class: 'who' }, `to ${o.customer_name} @ ${f.rate(o.sale_rate_paise)}`),
-            h('span', { class: 'pl ' + (o.margin_paise >= 0 ? 'up' : 'down') },
-              f.inr(o.margin_paise, { sign: true, compact: true })))))
-        : null)))));
-}
-
-function heroStat(label, value, tone) {
-  return h('div', {}, h('span', {}, label), h('b', { class: 'num ' + (tone || '') }, value));
-}
-
-// A proper sheet. Three fields deserve better than three browser prompts.
-function sheet(title, fields, onSave) {
-  const inputs = {};
-  const body = fields.map(fl => {
-    if (fl.type === 'choice') {
-      let value = fl.value || '';
-      const btns = fl.options.map(opt => h('button', {
-        class: 'msheet-toggle' + (value === opt ? ' on' : ''),
-        onclick: () => {
-          value = value === opt ? '' : opt;
-          for (const b of btns) b.classList.toggle('on', b.textContent === value);
-        }
-      }, opt));
-      inputs[fl.key] = () => value;
-      return h('div', { class: 'msheet-field' },
-        h('span', {}, fl.label), h('div', { class: 'msheet-toggles' }, ...btns));
-    }
-    if (fl.type === 'toggle') {
-      const btn = h('button', {
-        class: 'msheet-toggle' + (fl.value ? ' on' : ''),
-        onclick: () => { btn.classList.toggle('on'); }
-      }, fl.label);
-      inputs[fl.key] = () => btn.classList.contains('on');
-      return btn;
-    }
-    const input = h('input', {
-      type: fl.type || 'text', value: fl.value || '', placeholder: fl.placeholder || '',
-      inputmode: fl.type === 'tel' ? 'tel' : undefined
-    });
-    inputs[fl.key] = () => input.value.trim();
-    const chips = fl.chips
-      ? h('div', { class: 'msheet-dchips' }, ...fl.chips.map(([l, fn]) => h('button', {
-          class: 'mchip', type: 'button', onclick: () => { input.value = fn(inputs); }
-        }, l)))
-      : null;
-    // a <div>, not a <label>, when it holds buttons - a tap on a chip inside a
-    // label would also open the date picker
-    return h(chips ? 'div' : 'label', { class: 'msheet-field' },
-      h('span', {}, fl.label), input, chips,
-      fl.hint ? h('small', { class: 'msheet-hint' }, fl.hint) : null);
-  });
-
-  const toggles = body.filter(el => el.classList && el.classList.contains('msheet-toggle'));
-  const rest = body.filter(el => !toggles.includes(el));
-  const overlay = h('div', { class: 'msheet' },
-    h('div', { class: 'msheet-card' },
-      h('div', { class: 'msheet-title' }, title),
-      ...rest,
-      toggles.length ? h('div', { class: 'msheet-toggles' }, ...toggles) : null,
-      h('div', { class: 'msheet-foot' },
-        h('button', { class: 'mt-skip', onclick: () => overlay.remove() }, 'Cancel'),
-        h('button', {
-          class: 'mt-next',
-          onclick: async () => {
-            const values = {};
-            for (const [k, get] of Object.entries(inputs)) values[k] = get();
-            try { await onSave(values); overlay.remove(); }
-            catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
-          }
-        }, 'Save'))));
-  document.body.appendChild(overlay);
-  const first = overlay.querySelector('input');
-  if (first) setTimeout(() => first.focus(), 60);
-}
-
-// ==================================================================== setup
-export async function renderMobileSetup(root, appCtx) {
-  ctx = appCtx;
-  const [{ tree }, { parties }, { warehouses }] = await Promise.all(
-    [api.catalogTree(), api.partyList(), api.warehouses()]);
-  const open = ctx.setupOpen || (ctx.setupOpen = {});
-
-  const add = async (body, what) => {
-    try { await api.addCatalog(body); toast(`Added ${what}`); renderMobileSetup(root, ctx); }
-    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
-  };
-  const remove = async (body, what) => {
-    if (!window.confirm(`Remove ${what}?`)) return;
-    try { await api.removeCatalog(body); toast(`Removed ${what}`); renderMobileSetup(root, ctx); }
-    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
-  };
-  const ask = (label, run) => {
-    const v = window.prompt(label);
-    if (v && v.trim()) run(v.trim());
-  };
-
-  // A party: name, GSTIN, phone, address. PAN is read off the GSTIN, so it only
-  // needs typing for a party with no GSTIN. No buyer/seller split.
-  const editParty = (p) => sheet(p ? 'Edit party' : 'Add party', [
-    { key: 'name', label: 'Party name', value: p ? p.name : '', placeholder: 'Krishna Dehgam' },
-    { key: 'gstin', label: 'GSTIN', value: p ? (p.gstin || '') : '', placeholder: '24ABCDE1234F1Z5',
-      hint: p && p.gstin ? `PAN ${p.pan} · ${p.state || ''}` : 'PAN is filled in from the GSTIN.' },
-    { key: 'pan', label: 'PAN — only if there is no GSTIN', value: p && !p.gstin ? (p.pan || '') : '',
-      placeholder: 'ABCDE1234F' },
-    { key: 'phone', label: 'Phone', type: 'tel', value: p ? (p.phone || '') : '',
-      placeholder: '+91 98250 00000' },
-    { key: 'address', label: 'Address', value: p ? (p.address || p.city || '') : '',
-      placeholder: 'Full address' }
-  ], async values => {
-    if (!values.name) throw new Error('Name is required');
-    await api.partySave({ ...values, id: p ? p.id : undefined });
-    toast(p ? 'Saved' : `Added ${values.name}`);
-    renderMobileSetup(root, ctx);
-  });
-
-  const dropParty = async (p) => {
-    if (!window.confirm(`Remove ${p.name}?`)) return;
-    try { await api.partyRemove(p.id); toast(`Removed ${p.name}`); renderMobileSetup(root, ctx); }
-    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
-  };
-
-  // Two lists, one at a time. Stacking them meant scrolling past every
-  // counterparty to reach "add material".
-  const tab = ctx.setupTab || (ctx.setupTab = 'parties');
-  const show = t => { ctx.setupTab = t; renderMobileSetup(root, ctx); };
-
-  const partyCard = p => h('div', { class: 'mflow-card' },
-    h('div', { class: 'mflow-head' },
-      h('div', { class: 'grow', onclick: () => editParty(p) },
-        h('b', {}, p.name),
-        h('span', {}, p.gstin ? `${p.gstin}${p.state ? ' · ' + p.state : ''}` : 'no GSTIN')),
-      h('div', { class: 'mflow-money' },
-        h('b', { class: 'num' }, p.deal_count ? `${p.deal_count}` : '—'),
-        h('span', {}, p.deal_count ? 'deals' : 'unused')),
-      h('button', { class: 'msetup-x', onclick: () => dropParty(p) }, '×')),
-    p.phone || p.address
-      ? h('div', { class: 'mparty-addr' }, [p.phone, p.address].filter(Boolean).join(' · '))
-      : null);
-
-  // Hundreds of parties: only the matches are drawn, and only the list is
-  // redrawn while typing so the search box keeps its focus.
-  const plist = h('div', {});
-  const pcount = h('div', { class: 'mt-hint', style: { margin: '2px 0 10px' } }, '');
-  const paintParties = term => {
-    const t = (term || '').trim().toLowerCase();
-    const hits = !t ? parties : parties.filter(p =>
-      [p.name, p.gstin, p.address, p.phone].some(x => (x || '').toLowerCase().includes(t)));
-    pcount.textContent = hits.length > 60
-      ? `Showing 60 of ${hits.length} — search to narrow`
-      : `${hits.length} part${hits.length === 1 ? 'y' : 'ies'}`;
-    mount(plist, ...hits.slice(0, 60).map(partyCard));
-  };
-  paintParties('');
-
-  const partiesView = [
-    h('div', { class: 'mflow' },
-      h('button', { class: 'mmore', style: { marginBottom: '10px' }, onclick: () => editParty(null) },
-        '+ Add party'),
-      h('div', { class: 'msearch', style: { marginBottom: '4px' } },
-        h('span', { class: 'dim' }, '⌕'),
-        h('input', { placeholder: 'Name, GSTIN, address or phone',
-          oninput: e => paintParties(e.target.value) })),
-      pcount,
-      plist)
-  ];
-
-  // A warehouse is a name and a location. Renaming one is carried through every
-  // lot and deal that already records it, on the server, in one transaction.
-  const editWh = w => sheet(w ? 'Edit warehouse' : 'Add warehouse', [
-    { key: 'name', label: 'Name', value: w ? w.name : '', placeholder: 'Mundra' },
-    { key: 'location', label: 'Location', value: w ? (w.location || '') : '',
-      placeholder: 'Plot 12, Mundra Port' }
-  ], async v => {
-    if (!v.name) throw new Error('Name is required');
-    await api.saveWarehouse({ name: v.name, location: v.location, old_name: w ? w.name : undefined });
-    toast(w ? (w.name !== v.name ? `Renamed to ${v.name}` : 'Saved') : `Added ${v.name}`);
-    renderMobileSetup(root, ctx);
-  });
-  const dropWh = async w => {
-    if (!window.confirm(`Remove ${w.name}?`)) return;
-    try { await api.removeWarehouse(w.name); toast(`Removed ${w.name}`); renderMobileSetup(root, ctx); }
-    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
-  };
-  const warehousesView = [
-    h('div', { class: 'mflow' },
-      h('button', { class: 'mmore', style: { marginBottom: '10px' }, onclick: () => editWh(null) },
-        '+ Add warehouse'),
-      ...warehouses.map(w => h('div', { class: 'mflow-card' },
-        h('div', { class: 'mflow-head' },
-          h('div', { class: 'grow', onclick: () => editWh(w) },
-            h('b', {}, w.name),
-            h('span', {}, w.location || 'no location set')),
-          h('div', { class: 'mflow-money' },
-            h('b', { class: 'num' }, w.stock_g ? f.qty(w.stock_g) : '—'),
-            h('span', {}, w.stock_g ? 'in stock' : 'empty')),
-          h('button', { class: 'msetup-x', onclick: () => dropWh(w) }, '×')))),
-      warehouses.length ? null : h('div', { class: 'empty' }, h('h3', {}, 'No warehouses yet')))
-  ];
-
-  const materialsView = [
-    h('div', { class: 'mflow' },
-      h('button', {
-        class: 'mmore', style: { marginBottom: '10px' },
-        onclick: () => ask('New material, e.g. LLDPE', v => add({ material: v }, v))
-      }, '+ Add material'),
-      h('div', { class: 'mt-hint', style: { marginBottom: '10px' } },
-        'Manufacturer means who made the resin, not who you trade with.'),
-      ...tree.map(m => h('div', { class: 'mflow-card' },
-        h('div', {
-          class: 'mflow-head',
-          onclick: () => { open[m.material] = !open[m.material]; renderMobileSetup(root, ctx); }
-        },
-          h('span', { class: 'mflow-side lot' }, open[m.material] ? '▾' : '▸'),
-          h('div', { class: 'grow' },
-            h('b', {}, m.material),
-            h('span', {}, `${m.grades.length} grade${m.grades.length === 1 ? '' : 's'}`)),
-          h('div', { class: 'mflow-money' },
-            m.stock_g ? h('b', { class: 'num up' }, f.qty(m.stock_g)) : null)),
-
-        open[m.material]
-          ? h('div', { class: 'mflow-links' },
-              h('button', {
-                class: 'mmore', style: { marginBottom: '6px' },
-                onclick: () => ask(`New grade for ${m.material}`,
-                  v => add({ material: m.material, grade: v }, v))
-              }, '+ Grade'),
-              ...m.grades.map(g => h('div', {},
-                h('div', { class: 'mflow-link', style: { fontWeight: '620' } },
-                  h('i', { style: { background: 'var(--accent)' } }),
-                  h('span', { class: 'who' }, g.grade),
-                  h('span', { class: 'qty' }, g.stock_g ? f.qty(g.stock_g) : ''),
-                  h('button', {
-                    class: 'msetup-x',
-                    onclick: () => remove({ material: m.material, grade: g.grade },
-                      `${m.material} ${g.grade}`)
-                  }, '×')),
-                ...g.manufacturers.map(k => h('div', { class: 'mflow-link', style: { paddingLeft: '14px' } },
-                  h('i', { style: { background: 'var(--line-2)' } }),
-                  h('span', { class: 'who' }, k.manufacturer),
-                  h('span', { class: 'pl' }, k.deals ? `${k.deals} deals` : 'unused'),
-                  h('button', {
-                    class: 'msetup-x',
-                    onclick: () => remove(
-                      { material: m.material, grade: g.grade, manufacturer: k.manufacturer },
-                      k.manufacturer)
-                  }, '×'))),
-                h('button', {
-                  class: 'mmore', style: { margin: '4px 0 10px 14px' },
-                  onclick: () => ask(`New manufacturer for ${m.material} ${g.grade}`,
-                    v => add({ material: m.material, grade: g.grade, manufacturer: v }, v))
-                }, '+ Manufacturer'))))
-          : null)))
-  ];
-
-  mount(root, h('div', { class: 'view' },
-    h('div', { class: 'mflow', style: { paddingTop: '14px' } },
-      h('div', { class: 'mchips g3 filter', style: { padding: '0 0 10px' } },
-        h('button', {
-          class: 'mchip' + (tab === 'parties' ? ' on' : ''), onclick: () => show('parties')
-        }, `Parties · ${parties.length}`),
-        h('button', {
-          class: 'mchip' + (tab === 'warehouses' ? ' on' : ''), onclick: () => show('warehouses')
-        }, `Warehouses · ${warehouses.length}`),
-        h('button', {
-          class: 'mchip' + (tab === 'materials' ? ' on' : ''), onclick: () => show('materials')
-        }, `Materials · ${tree.length}`))),
-    ...(tab === 'parties' ? partiesView : tab === 'warehouses' ? warehousesView : materialsView)));
 }

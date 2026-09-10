@@ -26,6 +26,8 @@ SCHEMA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 IS_PG = bool(DATABASE_URL)
 
+SCHEMA_VERSION = "2"
+
 _local = threading.local()
 
 
@@ -40,6 +42,11 @@ def today() -> str:
 def slugify(text: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", (text or "").strip().lower()).strip("-")
     return s or "x"
+
+
+def clean(text) -> str:
+    """Collapse whitespace - the one normalisation every name goes through."""
+    return re.sub(r"\s+", " ", (text or "").strip())
 
 
 # ------------------------------------------------------------------ dialect
@@ -70,6 +77,18 @@ def schema_for_pg(sql: str) -> str:
         line = re.sub(r"\bINTEGER\b(?! PRIMARY KEY)", "BIGINT", line)
         out.append(line)
     return "\n".join(out)
+
+
+def statements(sql: str) -> List[str]:
+    """Split a script into statements, comments removed.
+
+    sqlite3's executescript() commits whatever transaction is open before it
+    runs, so a migration that must be all-or-nothing runs its DDL one
+    statement at a time instead.
+    """
+    body = "\n".join(re.sub(r"--.*$", "", line) for line in sql.splitlines())
+    return [s.strip() for s in body.split(";")
+            if s.strip() and not s.strip().upper().startswith("PRAGMA")]
 
 
 def _int_rows(cursor):
@@ -115,11 +134,10 @@ class Conn:
             return int(row["id"] if isinstance(row, dict) else row[0])
         return int(self.raw.execute(sql, tuple(args)).lastrowid)
 
-    def executescript(self, sql: str) -> None:
-        if self.is_pg:
-            self.raw.execute(schema_for_pg(sql))
-        else:
-            self.raw.executescript(sql)
+    def script(self, sql: str) -> None:
+        """Run a schema script statement by statement, inside any open transaction."""
+        for stmt in statements(schema_for_pg(sql) if self.is_pg else sql):
+            self.execute(stmt)
 
 
 def connect() -> Conn:
@@ -143,99 +161,122 @@ def connect() -> Conn:
     return conn
 
 
-# Columns added after the first production deploy. CREATE TABLE IF NOT EXISTS
-# never alters a table that already exists, so a live database would silently
-# lack them; these are added in place, once, on boot.
-MIGRATIONS = [
-    ("deals", "warehouse", "TEXT"),
-    ("deals", "payment_due", "TEXT"),
-    ("deals", "ex_place", "TEXT"),
-    ("lots", "warehouse", "TEXT"),
-    ("parties", "address", "TEXT"),
-    ("parties", "gstin", "TEXT"),
-    ("parties", "pan", "TEXT"),
-    ("warehouses", "location", "TEXT"),
-]
+# ------------------------------------------------------------------ introspection
+def has_table(conn, table: str) -> bool:
+    if conn.is_pg:
+        return bool(scalar("SELECT COUNT(*) FROM information_schema.tables "
+                           "WHERE table_schema = current_schema() AND table_name = ?", (table,)))
+    return bool(scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", (table,)))
 
 
-def _has_column(conn, table: str, column: str) -> bool:
+def has_column(conn, table: str, column: str) -> bool:
     if conn.is_pg:
         return bool(scalar(
             "SELECT COUNT(*) FROM information_schema.columns "
-            "WHERE table_name = ? AND column_name = ?", (table, column)))
+            "WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?",
+            (table, column)))
     return any(r["name"] == column for r in conn.raw.execute("PRAGMA table_info(%s)" % table))
 
 
-def migrate(conn) -> None:
-    added = set()
-    for table, column, kind in MIGRATIONS:
-        if not _has_column(conn, table, column):
-            conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, kind))
-            added.add((table, column))
-    # Parties used to carry only a city. Carry it into the new address field the
-    # one time that field appears, so nobody's details vanish from the screen -
-    # and never again after that, so a deliberately cleared address stays clear.
-    if ("parties", "address") in added:
-        conn.execute("UPDATE parties SET address = city "
-                     "WHERE address IS NULL AND city IS NOT NULL AND city != ''")
-    # A party is unique by GSTIN. The index lives here, not in schema.sql: on an
-    # older database schema.sql runs before the column exists, and an index on a
-    # missing column would abort the whole boot. NULLs do not collide, so parties
-    # with no GSTIN are unaffected.
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_parties_gstin ON parties(gstin)")
+def sync_sequence(conn, table: str) -> None:
+    """After rows are copied in with their ids, Postgres' counter must move past them."""
+    if conn.is_pg:
+        conn.execute("SELECT setval(pg_get_serial_sequence('%s','id'), "
+                     "COALESCE((SELECT MAX(id) FROM %s), 0) + 1, false)" % (table, table))
 
 
+# ------------------------------------------------------------------ boot
 def init_db() -> None:
     conn = connect()
+    from .migrate import upgrade
+    upgrade(conn)                              # a v1 book is rebuilt first, if there is one
     with open(SCHEMA) as fh:
-        conn.executescript(fh.read())
-    migrate(conn)
-    defaults = {
-        "company_name": "Labdhi Exim",
-        "sauda_prefix": "LE",       # LE/26-27/0001
-        "alloc_policy": "fifo",
-        "allow_short_sales": "0",   # a short must be an explicit choice, never a default
-        "unit": "kg",
-    }
-    for k, v in defaults.items():
-        conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", (k, v))
+        schema = fh.read()
+    with tx() as c:
+        c.script(schema)
+        seed_reference(c)
+        defaults = {
+            "company_name": "Labdhi Exim",
+            "sauda_prefix": "LE",       # LE/26-27/0001
+            "alloc_policy": "fifo",
+            "allow_short_sales": "0",   # a short must be an explicit choice, never a default
+            "unit": "kg",
+            "schema_version": SCHEMA_VERSION,
+        }
+        for k, v in defaults.items():
+            c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", (k, v))
 
 
-TABLES = ["allocations", "lots", "deals", "marks", "events", "skus", "parties",
-          "catalog_makers", "catalog_grades", "catalog_materials", "warehouses", "settings"]
+def seed_reference(conn) -> None:
+    from .gst import STATES
+    for code, name in STATES.items():
+        conn.execute("INSERT OR IGNORE INTO states(code,name) VALUES (?,?)", (code, name))
+
+
+# Everything, children first. Legacy names are listed so a reset also clears a
+# half-migrated book.
+TABLES = ["stock_moves", "allocations", "lots", "marks", "deals", "events",
+          "products", "manufacturers", "grades", "materials", "parties", "states",
+          "warehouses", "settings",
+          "skus", "catalog_makers", "catalog_grades", "catalog_materials"]
 
 
 def reset() -> None:
-    """Wipe the book. Used only by the seed script."""
+    """Wipe the book. Used by the seed script and the tests."""
     if IS_PG:
         conn = connect()
+        conn.execute("DROP VIEW IF EXISTS v_products")
         for table in TABLES:
             conn.execute("DROP TABLE IF EXISTS %s CASCADE" % table)
         conn.raw.close()
         _local.__dict__.clear()
         return
+    close()
     for suffix in ("", "-wal", "-shm"):
         path = DB_PATH + suffix
         if os.path.exists(path):
             os.remove(path)
+
+
+def close() -> None:
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.raw.close()
+        except Exception:
+            pass
     _local.__dict__.clear()
 
 
 @contextmanager
 def tx():
-    """One atomic unit of work. Any exception rolls the whole thing back."""
+    """One atomic unit of work. Any exception rolls the whole thing back.
+
+    Nested use joins the outer transaction instead of committing half of it.
+    """
     conn = connect()
-    if conn.is_pg:
-        with conn.raw.transaction():
+    if getattr(_local, "depth", 0):
+        _local.depth += 1
+        try:
             yield conn
+        finally:
+            _local.depth -= 1
         return
-    conn.raw.execute("BEGIN IMMEDIATE")
+    _local.depth = 1
     try:
-        yield conn
-        conn.raw.execute("COMMIT")
-    except Exception:
-        conn.raw.execute("ROLLBACK")
-        raise
+        if conn.is_pg:
+            with conn.raw.transaction():
+                yield conn
+            return
+        conn.raw.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+            conn.raw.execute("COMMIT")
+        except BaseException:
+            conn.raw.execute("ROLLBACK")
+            raise
+    finally:
+        _local.depth = 0
 
 
 # ------------------------------------------------------------------ helpers
@@ -257,6 +298,33 @@ def scalar(sql: str, args: Iterable = (), default=0):
 
 def row_to_dict(row) -> Optional[Dict[str, Any]]:
     return dict(row) if row is not None else None
+
+
+def dicts(rows) -> List[Dict[str, Any]]:
+    return [dict(r) for r in rows]
+
+
+def like(term: Optional[str]) -> Optional[str]:
+    term = (term or "").strip().lower()
+    return "%%%s%%" % term if term else None
+
+
+# ------------------------------------------------------------------ paging
+# Every list in the system is served the same way: ?q=&limit=&offset= plus its
+# own filters, answered with one page and the size of the whole match. The
+# screens never hold a full table, so a list can grow without limit.
+DEFAULT_PAGE = 25
+MAX_PAGE = 200
+
+
+def page_args(limit: Optional[int], offset: Optional[int], default: int = DEFAULT_PAGE):
+    limit = default if limit is None else max(1, min(MAX_PAGE, int(limit)))
+    return limit, max(0, int(offset or 0))
+
+
+def page(items: List[Dict[str, Any]], total: int, limit: int, offset: int) -> Dict[str, Any]:
+    return {"items": items, "total": int(total), "limit": limit, "offset": offset,
+            "has_more": offset + len(items) < int(total)}
 
 
 def settings() -> Dict[str, str]:

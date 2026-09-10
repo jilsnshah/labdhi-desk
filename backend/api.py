@@ -1,23 +1,30 @@
-"""HTTP surface. Thin: parse, call a service, return JSON."""
+"""HTTP surface. Thin: parse, call a service, return JSON.
+
+One contract for every list: GET /api/<things>?q=&limit=&offset=&<filters>
+answers {items, total, limit, offset, has_more}. One contract for every master
+record: POST /api/<things> with an id edits it, without one creates it, and the
+saved record comes back so a form can hand it straight to the ticket that
+opened it. POST /api/<things>/<id>/remove refuses while anything refers to it.
+"""
 from __future__ import annotations
 
 import os
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from . import db, security
-from .money import parse_qty, parse_rate
-from .services import allocation, catalog, dashboard, deals, inventory
+from .services import (allocation, dashboard, deals, inventory, parties, products, stock,
+                       warehouses)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB = os.path.join(ROOT, "web")
 
-app = FastAPI(title="Labdhi Trading Desk", version="1.0")
+app = FastAPI(title="Labdhi Trading Desk", version="2.0")
 
 _origins = [o.strip() for o in os.environ.get("LABDHI_ORIGINS", "").split(",") if o.strip()]
 if _origins:
@@ -45,13 +52,7 @@ def health():
 
 @app.middleware("http")
 async def no_stale_assets(request, call_next):
-    """Never let a browser hold on to an old build.
-
-    Without an explicit Cache-Control, browsers fall back to heuristic caching
-    and will happily keep serving yesterday's JS module without revalidating.
-    On a single-user desk app there is nothing to gain from caching and a whole
-    class of "I still see the old screen" confusion to lose.
-    """
+    """Never let a browser hold on to an old build."""
     response = await call_next(request)
     if not request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store, must-revalidate"
@@ -69,192 +70,25 @@ def _value_error(_request, exc: ValueError):
     return JSONResponse(status_code=400, content={"error": str(exc)})
 
 
-# ------------------------------------------------------------------ models
-class DealIn(BaseModel):
-    side: str
-    party_id: Optional[int] = None
-    party_name: Optional[str] = None
-    sku_id: Optional[int] = None
-    material: Optional[str] = None        # PVC
-    grade: Optional[str] = None           # HS1000
-    manufacturer: Optional[str] = None    # Chemplast Sanmar  (never the supplier)
-    packing: Optional[str] = None
-    qty: Optional[str] = None
-    qty_g: Optional[int] = None
-    rate: Optional[str] = None
-    rate_paise: Optional[int] = None
-    plus_gst: bool = True
-    deal_date: Optional[str] = None
-    transporter: Optional[str] = None
-    freight_by: Optional[str] = None
-    delivery_by: Optional[str] = None
-    payment_terms: Optional[str] = None
-    eway: Optional[str] = None
-    remarks: Optional[str] = None
-    sauda_no: Optional[str] = None        # LE/26-27/0001; blank means "issue the next one"
-    warehouse: Optional[str] = None       # stock location
-    payment_due: Optional[str] = None     # ISO date
-    ex_place: Optional[str] = None        # pricing basis, e.g. Ex-Mundra
-    policy: Optional[str] = None
-    pins: Optional[List[Dict[str, int]]] = None
-    allow_short: bool = False
-    confirm: bool = True
+def _found(record, what: str):
+    if record is None:
+        raise HTTPException(404, "No such %s" % what)
+    return record
 
 
-class PreviewIn(BaseModel):
-    sku_id: Optional[int] = None
-    material: Optional[str] = None
-    grade: Optional[str] = None
-    manufacturer: Optional[str] = None        # PVC
-    grade: Optional[str] = None           # HS1000
-    manufacturer: Optional[str] = None    # Chemplast Sanmar  (never the supplier)
-    packing: Optional[str] = None
-    qty: Optional[str] = None
-    qty_g: Optional[int] = None
-    rate: Optional[str] = None
-    rate_paise: Optional[int] = None
-    policy: str = allocation.DEFAULT_POLICY
-    pins: Optional[List[Dict[str, int]]] = None
-    prefer_supplier: Optional[int] = None
-    ignore_sale_id: Optional[int] = None
-
-
-class ReallocIn(BaseModel):
-    pins: Optional[List[Dict[str, int]]] = None
-    policy: Optional[str] = None
-
-
-class MarkIn(BaseModel):
-    rate: Optional[str] = None
-    rate_paise: Optional[int] = None
-
-
-class SettingsIn(BaseModel):
-    company_name: Optional[str] = None
-    alloc_policy: Optional[str] = None
-    allow_short_sales: Optional[bool] = None
-
-
-def _qty_of(m) -> int:
-    if m.qty_g:
-        return int(m.qty_g)
-    if m.qty:
-        return parse_qty(m.qty)
-    raise ValueError("Quantity is missing")
-
-
-def _rate_of(m, required: bool = True):
-    if m.rate_paise:
-        return int(m.rate_paise), bool(getattr(m, "plus_gst", True))
-    if m.rate:
-        return parse_rate(m.rate)
-    if required:
-        raise ValueError("Rate is missing")
-    return 0, True
-
-
-def _resolve_sku(m) -> int:
-    if m.sku_id:
-        return int(m.sku_id)
-    if m.material and m.grade:
-        with db.tx() as conn:
-            return catalog.upsert_sku(conn, material=m.material, grade=m.grade,
-                                      manufacturer=m.manufacturer or "")
-    raise ValueError("Material, grade and manufacturer are needed")
-
-
-# ------------------------------------------------------------------ reads
+# ================================================================== summary
 @app.get("/api/bootstrap")
 def bootstrap() -> Dict[str, Any]:
-    """One call the app opens with - everything the first screen needs."""
-    return {
-        "settings": db.settings(),
-        "desk": dashboard.summary(),
-        "tape": dashboard.tape(25)["deals"],
-        "suppliers": catalog.search_parties(role="supplier", limit=10),
-        "customers": catalog.search_parties(role="customer", limit=10),
-        "materials": catalog.search_skus(limit=12),
-        "undo": deals.last_undoable(),
-    }
+    """What the first screen needs, in one call."""
+    return {"settings": db.settings(), "summary": dashboard.summary(), "undo": deals.last_undoable()}
 
 
-@app.get("/api/desk")
-def desk(q: str = "", limit: int = dashboard.POSITION_PAGE, offset: int = 0,
-         material: Optional[str] = None, grade: Optional[str] = None,
-         manufacturer: Optional[str] = None, supplier_id: Optional[int] = None) -> Dict[str, Any]:
-    return dashboard.summary(q=q, limit=limit, offset=offset, material=material,
-                             grade=grade, manufacturer=manufacturer, supplier_id=supplier_id)
+@app.get("/api/summary")
+def summary() -> Dict[str, Any]:
+    return dashboard.summary()
 
 
-@app.get("/api/tape")
-def tape(limit: int = 30, offset: int = 0, q: str = "",
-         side: Optional[str] = None, status: Optional[str] = None,
-         date_from: Optional[str] = None, date_to: Optional[str] = None,
-         material: Optional[str] = None, grade: Optional[str] = None,
-         manufacturer: Optional[str] = None) -> Dict[str, Any]:
-    page = dashboard.tape(limit, offset, q, side=side, status=status,
-                          date_from=date_from, date_to=date_to, material=material,
-                          grade=grade, manufacturer=manufacturer)
-    if offset == 0:
-        page["counterparties"] = dashboard.counterparties()
-    return page
-
-
-@app.get("/api/positions")
-def positions(include_flat: bool = False, q: str = "",
-              limit: Optional[int] = None, offset: int = 0,
-              material: Optional[str] = None, grade: Optional[str] = None,
-              manufacturer: Optional[str] = None, supplier_id: Optional[int] = None) -> Dict[str, Any]:
-    f = dict(material=material, grade=grade, manufacturer=manufacturer, supplier_id=supplier_id)
-    return {
-        "positions": inventory.positions(include_flat=include_flat, q=q, limit=limit,
-                                         offset=offset, **f),
-        "matched": inventory.count_positions(q=q, include_flat=include_flat, **f),
-    }
-
-
-@app.get("/api/positions/{sku_id}")
-def position(sku_id: int) -> Dict[str, Any]:
-    detail = inventory.position_detail(sku_id)
-    if detail is None:
-        raise HTTPException(404, "No such material")
-    return detail
-
-
-@app.get("/api/graph")
-def graph(sku_id: Optional[int] = None, date_from: Optional[str] = None,
-          date_to: Optional[str] = None, limit: int = 60) -> Dict[str, Any]:
-    return inventory.graph(sku_id, date_from, date_to, limit)
-
-
-@app.get("/api/trace/{kind}/{entity_id}")
-def trace(kind: str, entity_id: int) -> Dict[str, Any]:
-    if kind not in ("lot", "sale"):
-        raise HTTPException(400, "kind must be lot or sale")
-    return inventory.trace(kind, entity_id)
-
-
-@app.get("/api/search/parties")
-def search_parties(q: str = "", role: Optional[str] = None, limit: int = 8):
-    return {"results": catalog.search_parties(q, role, limit)}
-
-
-@app.get("/api/search/materials")
-def search_materials(q: str = "", limit: int = 8, in_stock: bool = False):
-    return {"results": catalog.search_skus(q, limit, in_stock_only=in_stock)}
-
-
-@app.get("/api/catalog/options")
-def catalog_options(level: str, material: Optional[str] = None,
-                    grade: Optional[str] = None, in_stock: bool = False):
-    """One rung of material -> grade -> manufacturer, narrowed by the rungs above."""
-    known = {"material": catalog.MATERIALS, "grade": [], "manufacturer": catalog.MAKERS}
-    return {
-        "options": catalog.options(level, material, grade, in_stock),
-        "suggestions": known.get(level, []),
-    }
-
-
+# ================================================================== parties
 class PartyIn(BaseModel):
     id: Optional[int] = None
     name: str
@@ -262,161 +96,323 @@ class PartyIn(BaseModel):
     address: Optional[str] = ""
     gstin: Optional[str] = ""
     pan: Optional[str] = ""                # ignored when a GSTIN is given
-    city: Optional[str] = ""
-    is_supplier: bool = False
-    is_customer: bool = False
+    state_code: Optional[str] = ""         # ignored when a GSTIN is given
 
 
 @app.get("/api/parties")
-def list_parties(q: str = ""):
-    return {"parties": catalog.list_parties(q)}
+def list_parties(q: str = "", state_code: Optional[str] = None, holding: bool = False,
+                 limit: Optional[int] = None, offset: int = 0):
+    return parties.list_parties(q, state_code, holding, limit, offset)
+
+
+@app.get("/api/parties/{party_id}")
+def get_party(party_id: int):
+    return _found(parties.get_party(party_id), "party")
 
 
 @app.post("/api/parties")
 def save_party(body: PartyIn):
     with db.tx() as conn:
-        pid = catalog.save_party(
-            conn, name=body.name, phone=body.phone or "", city=body.city or "",
-            is_supplier=body.is_supplier, is_customer=body.is_customer, party_id=body.id,
-            address=body.address or "", gstin=body.gstin or "", pan=body.pan or "")
-    return {"id": pid, "parties": catalog.list_parties()}
+        pid = parties.save_party(conn, name=body.name, phone=body.phone or "",
+                                 address=body.address or "", gstin=body.gstin or "",
+                                 pan=body.pan or "", state_code=body.state_code or "",
+                                 party_id=body.id)
+    return parties.get_party(pid)
 
 
 @app.post("/api/parties/{party_id}/remove")
 def remove_party(party_id: int):
     with db.tx() as conn:
-        catalog.remove_party(conn, party_id)
-    return {"parties": catalog.list_parties()}
+        parties.remove_party(conn, party_id)
+    return {"removed": party_id}
 
 
-@app.get("/api/catalog/tree")
-def catalog_tree():
-    """The whole master tree, for the Setup screen."""
-    return {"tree": catalog.tree(), "makers": catalog.MAKERS, "materials": catalog.MATERIALS}
+@app.get("/api/gstin/{gstin}")
+def check_gstin(gstin: str):
+    return parties.check_gstin(gstin)
 
 
-class CatalogIn(BaseModel):
-    material: str
-    grade: Optional[str] = None
-    manufacturer: Optional[str] = None
+@app.get("/api/states")
+def list_states(q: str = "", limit: Optional[int] = None, offset: int = 0):
+    return parties.list_states(q, limit, offset)
 
 
-@app.post("/api/catalog/entry")
-def catalog_add(body: CatalogIn):
-    with db.tx() as conn:
-        if body.manufacturer:
-            if not body.grade:
-                raise ValueError("A manufacturer needs a grade")
-            catalog.add_maker(conn, body.material, body.grade, body.manufacturer)
-        elif body.grade:
-            catalog.add_grade(conn, body.material, body.grade)
-        else:
-            catalog.add_material(conn, body.material)
-    return {"tree": catalog.tree()}
-
-
-@app.post("/api/catalog/remove")
-def catalog_remove(body: CatalogIn):
-    with db.tx() as conn:
-        catalog.remove(conn, body.material, body.grade, body.manufacturer)
-    return {"tree": catalog.tree()}
-
-
-@app.get("/api/catalog/resolve")
-def catalog_resolve(material: str, grade: str, manufacturer: str = ""):
-    sku = catalog.resolve(material, grade, manufacturer)
-    if sku is None:
-        return {"sku": None}
-    sku["stock_g"] = db.scalar(
-        "SELECT COALESCE(SUM(qty_g - qty_allocated_g),0) FROM lots "
-        "WHERE sku_id=? AND status='open'", (sku["id"],))
-    return {"sku": sku}
-
-
-@app.get("/api/lots/{sku_id}")
-def lots(sku_id: int, warehouse: Optional[str] = None):
-    return {"lots": allocation.available_lots(sku_id, warehouse=warehouse)}
-
-
-@app.get("/api/sauda/next")
-def sauda_next(date: Optional[str] = None):
-    """The number the next deal on this date would get - for the regenerate button."""
-    return {"sauda_no": deals.next_sauda_no(date)}
-
-
+# ================================================================== warehouses
 class WarehouseIn(BaseModel):
+    id: Optional[int] = None
     name: str
-    location: Optional[str] = None
-    old_name: Optional[str] = None       # set when renaming
+    address: Optional[str] = None
 
 
 @app.get("/api/warehouses")
-def warehouses():
-    return {"warehouses": catalog.list_warehouses()}
+def list_warehouses(q: str = "", product_id: Optional[int] = None, in_stock: bool = False,
+                    limit: Optional[int] = None, offset: int = 0):
+    return warehouses.list_warehouses(q, product_id, in_stock, limit, offset)
+
+
+@app.get("/api/warehouses/{warehouse_id}")
+def get_warehouse(warehouse_id: int):
+    return _found(warehouses.get_warehouse(warehouse_id), "warehouse")
 
 
 @app.post("/api/warehouses")
 def save_warehouse(body: WarehouseIn):
     with db.tx() as conn:
-        catalog.save_warehouse(conn, body.name, body.location, body.old_name)
-    return {"warehouses": catalog.list_warehouses()}
+        wid = warehouses.save_warehouse(conn, body.name, body.address, body.id)
+    return warehouses.get_warehouse(wid)
 
 
-@app.post("/api/warehouses/remove")
-def remove_warehouse(body: WarehouseIn):
+@app.post("/api/warehouses/{warehouse_id}/remove")
+def remove_warehouse(warehouse_id: int):
     with db.tx() as conn:
-        catalog.remove_warehouse(conn, body.name)
-    return {"warehouses": catalog.list_warehouses()}
+        warehouses.remove_warehouse(conn, warehouse_id)
+    return {"removed": warehouse_id}
+
+
+# ================================================================== product tree
+class NameIn(BaseModel):
+    id: Optional[int] = None
+    name: str
+    material_id: Optional[int] = None      # grades only
+
+
+class ProductIn(BaseModel):
+    id: Optional[int] = None
+    material: str
+    grade: str
+    manufacturer: str
+    packing: Optional[str] = None
+
+
+@app.get("/api/materials")
+def list_materials(q: str = "", has_products: bool = False, in_stock: bool = False,
+                   limit: Optional[int] = None, offset: int = 0):
+    return products.list_materials(q, has_products, in_stock, limit, offset)
+
+
+@app.post("/api/materials")
+def save_material(body: NameIn):
+    with db.tx() as conn:
+        mid = products.save_material(conn, body.name, body.id)
+    return {"id": mid}
+
+
+@app.post("/api/materials/{material_id}/remove")
+def remove_material(material_id: int):
+    with db.tx() as conn:
+        products.remove_material(conn, material_id)
+    return {"removed": material_id}
+
+
+@app.get("/api/grades")
+def list_grades(material_id: Optional[int] = None, q: str = "", has_products: bool = False,
+                in_stock: bool = False, limit: Optional[int] = None, offset: int = 0):
+    return products.list_grades(material_id, q, has_products, in_stock, limit, offset)
+
+
+@app.post("/api/grades")
+def save_grade(body: NameIn):
+    with db.tx() as conn:
+        gid = products.save_grade(conn, body.material_id, body.name, body.id)
+    return {"id": gid}
+
+
+@app.post("/api/grades/{grade_id}/remove")
+def remove_grade(grade_id: int):
+    with db.tx() as conn:
+        products.remove_grade(conn, grade_id)
+    return {"removed": grade_id}
+
+
+@app.get("/api/manufacturers")
+def list_manufacturers(q: str = "", limit: Optional[int] = None, offset: int = 0):
+    return products.list_manufacturers(q, limit, offset)
+
+
+@app.post("/api/manufacturers")
+def save_manufacturer(body: NameIn):
+    with db.tx() as conn:
+        kid = products.save_manufacturer(conn, body.name, body.id)
+    return {"id": kid}
+
+
+@app.post("/api/manufacturers/{manufacturer_id}/remove")
+def remove_manufacturer(manufacturer_id: int):
+    with db.tx() as conn:
+        products.remove_manufacturer(conn, manufacturer_id)
+    return {"removed": manufacturer_id}
+
+
+@app.get("/api/products")
+def list_products(q: str = "", material_id: Optional[int] = None, grade_id: Optional[int] = None,
+                  manufacturer_id: Optional[int] = None, warehouse_id: Optional[int] = None,
+                  in_stock: bool = False, limit: Optional[int] = None, offset: int = 0):
+    return products.list_products(q, material_id, grade_id, manufacturer_id, warehouse_id,
+                                  in_stock, limit, offset)
+
+
+@app.get("/api/products/{product_id}")
+def get_product(product_id: int):
+    return _found(products.get_product(product_id), "product")
+
+
+@app.post("/api/products")
+def save_product(body: ProductIn):
+    with db.tx() as conn:
+        res = products.save_product(conn, body.material, body.grade, body.manufacturer,
+                                    body.packing, body.id)
+    out = products.get_product(res["id"])
+    out["existed"] = res["existed"]
+    return out
+
+
+@app.post("/api/products/{product_id}/remove")
+def remove_product(product_id: int):
+    with db.tx() as conn:
+        products.remove_product(conn, product_id)
+    return {"removed": product_id}
+
+
+# ================================================================== stock
+class TransferIn(BaseModel):
+    lot_id: int
+    to_warehouse_id: int
+    qty_g: int
+    move_date: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class AdjustIn(BaseModel):
+    lot_id: int
+    qty_g: int                             # negative writes off, positive finds
+    move_date: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@app.get("/api/positions")
+def list_positions(q: str = "", include_flat: bool = False, warehouse_id: Optional[int] = None,
+                   material_id: Optional[int] = None, grade_id: Optional[int] = None,
+                   manufacturer_id: Optional[int] = None, supplier_id: Optional[int] = None,
+                   limit: Optional[int] = None, offset: int = 0):
+    return inventory.positions(include_flat=include_flat, q=q, limit=limit, offset=offset,
+                               warehouse_id=warehouse_id, material_id=material_id,
+                               grade_id=grade_id, manufacturer_id=manufacturer_id,
+                               supplier_id=supplier_id)
+
+
+@app.get("/api/positions/{product_id}")
+def get_position(product_id: int):
+    return _found(inventory.position_detail(product_id), "product")
+
+
+@app.get("/api/stock")
+def list_stock(q: str = "", product_id: Optional[int] = None, warehouse_id: Optional[int] = None,
+               material_id: Optional[int] = None, grade_id: Optional[int] = None,
+               manufacturer_id: Optional[int] = None, limit: Optional[int] = None, offset: int = 0):
+    return stock.stock_rows(q, product_id, warehouse_id, material_id, grade_id, manufacturer_id,
+                            limit, offset)
+
+
+@app.get("/api/stock/lots")
+def stock_lots(product_id: int, warehouse_id: Optional[int] = None):
+    """Every open lot of a product (in one warehouse) - the set a sale is split across."""
+    return {"items": stock.lots_for(product_id, warehouse_id)}
+
+
+@app.get("/api/stock/moves")
+def stock_moves(product_id: Optional[int] = None, warehouse_id: Optional[int] = None,
+                lot_id: Optional[int] = None, limit: Optional[int] = None, offset: int = 0):
+    return stock.movements(product_id, warehouse_id, lot_id, limit, offset)
+
+
+@app.post("/api/stock/transfer")
+def transfer(body: TransferIn):
+    return stock.transfer(body.lot_id, body.to_warehouse_id, body.qty_g, body.move_date, body.reason)
+
+
+@app.post("/api/stock/adjust")
+def adjust(body: AdjustIn):
+    return stock.adjust(body.lot_id, body.qty_g, body.move_date, body.reason)
+
+
+@app.post("/api/stock/moves/{move_id}/cancel")
+def cancel_move(move_id: int):
+    return stock.cancel_move(move_id)
+
+
+@app.get("/api/graph")
+def graph(product_id: Optional[int] = None, warehouse_id: Optional[int] = None,
+          date_from: Optional[str] = None, date_to: Optional[str] = None, limit: int = 60):
+    return inventory.graph(product_id, date_from, date_to, limit, warehouse_id)
+
+
+@app.get("/api/trace/{kind}/{entity_id}")
+def trace(kind: str, entity_id: int):
+    if kind not in ("lot", "sale"):
+        raise HTTPException(400, "kind must be lot or sale")
+    return inventory.trace(kind, entity_id)
+
+
+# ================================================================== deals
+class DealIn(BaseModel):
+    side: str
+    party_id: Optional[int] = None
+    product_id: Optional[int] = None
+    warehouse_id: Optional[int] = None     # buy: receiving; sell: dispatching
+    qty_g: int
+    rate_paise: int
+    plus_gst: bool = True
+    deal_date: Optional[str] = None
+    sauda_no: Optional[str] = None         # blank means "issue the next one"
+    payment_due: Optional[str] = None
+    ex_place: Optional[str] = None
+    transporter_id: Optional[int] = None
+    freight_by: Optional[str] = None
+    delivery_by: Optional[str] = None
+    payment_terms: Optional[str] = None
+    eway: Optional[str] = None
+    remarks: Optional[str] = None
+    policy: Optional[str] = None
+    pins: Optional[List[Dict[str, int]]] = None
+    allow_short: bool = False
+    confirm: bool = True
+
+
+class PreviewIn(BaseModel):
+    product_id: int
+    warehouse_id: Optional[int] = None
+    qty_g: int
+    rate_paise: int = 0
+    policy: str = allocation.DEFAULT_POLICY
+    pins: Optional[List[Dict[str, int]]] = None
+
+
+class ReallocIn(BaseModel):
+    pins: Optional[List[Dict[str, int]]] = None
+    policy: Optional[str] = None
 
 
 @app.get("/api/deals")
-def list_deals(side: Optional[str] = None, status: Optional[str] = None,
-               sku_id: Optional[int] = None, party_id: Optional[int] = None,
-               limit: int = 60, offset: int = 0, q: str = ""):
-    return {
-        "deals": deals.list_deals(side, status, sku_id, party_id, limit, offset, q),
-        "matched": deals.count_deals(side, status, sku_id, party_id, q),
-    }
+def list_deals(q: str = "", side: Optional[str] = None, status: Optional[str] = None,
+               party_id: Optional[int] = None, product_id: Optional[int] = None,
+               warehouse_id: Optional[int] = None, material_id: Optional[int] = None,
+               grade_id: Optional[int] = None, manufacturer_id: Optional[int] = None,
+               date_from: Optional[str] = None, date_to: Optional[str] = None,
+               limit: Optional[int] = None, offset: int = 0):
+    return deals.list_deals(limit=limit, offset=offset, q=q, side=side, status=status,
+                            party_id=party_id, product_id=product_id, warehouse_id=warehouse_id,
+                            material_id=material_id, grade_id=grade_id,
+                            manufacturer_id=manufacturer_id, date_from=date_from, date_to=date_to)
 
 
 @app.get("/api/deals/{deal_id}")
 def get_deal(deal_id: int):
-    d = deals.get_deal(deal_id)
-    if d is None:
-        raise HTTPException(404, "No such deal")
-    return d
-
-
-@app.get("/api/events")
-def events(limit: int = 60):
-    rows = db.q("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,))
-    return {"events": [dict(r) for r in rows]}
-
-
-# ------------------------------------------------------------------ writes
-@app.post("/api/preview/sell")
-def preview_sell(body: PreviewIn) -> Dict[str, Any]:
-    """Live margin as the trader moves the quantity and rate. No writes."""
-    sku_id = _resolve_sku(body)
-    qty_g = _qty_of(body)
-    rate_paise, _ = _rate_of(body, required=False)
-    plan = allocation.preview(sku_id, qty_g, rate_paise, body.policy,
-                              pins=body.pins, prefer_supplier=body.prefer_supplier,
-                              ignore_sale_id=body.ignore_sale_id)
-    plan["lots"] = allocation.available_lots(sku_id)
-    plan["sku"] = catalog.get_sku(sku_id)
-    return plan
+    return _found(deals.get_deal(deal_id), "deal")
 
 
 @app.post("/api/deals")
 def create_deal(body: DealIn) -> Dict[str, Any]:
-    payload = body.dict()
-    payload["qty_g"] = _qty_of(body)
-    rate_paise, plus = _rate_of(body)
-    payload["rate_paise"] = rate_paise
-    if body.rate:
-        payload["plus_gst"] = plus
-    return deals.create_deal(payload)
+    return deals.create_deal(body.dict())
 
 
 @app.post("/api/deals/{deal_id}/book")
@@ -434,6 +430,25 @@ def cancel(deal_id: int, reason: str = "") -> Dict[str, Any]:
     return deals.cancel_deal(deal_id, reason)
 
 
+@app.post("/api/preview/sell")
+def preview_sell(body: PreviewIn) -> Dict[str, Any]:
+    """Live margin as the trader moves the quantity and rate. No writes."""
+    plan = allocation.preview(body.product_id, body.qty_g, body.rate_paise, body.policy,
+                              pins=body.pins, warehouse_id=body.warehouse_id)
+    plan["lots"] = stock.lots_for(body.product_id, body.warehouse_id)
+    return plan
+
+
+@app.get("/api/sauda/next")
+def sauda_next(date: Optional[str] = None):
+    return {"sauda_no": deals.next_sauda_no(date)}
+
+
+@app.get("/api/counterparties")
+def counterparties(limit: Optional[int] = None, offset: int = 0):
+    return dashboard.counterparties(limit, offset)
+
+
 @app.post("/api/undo")
 def undo(event_id: Optional[int] = None) -> Dict[str, Any]:
     if event_id is None:
@@ -441,20 +456,41 @@ def undo(event_id: Optional[int] = None) -> Dict[str, Any]:
         if not ev:
             raise HTTPException(400, "Nothing to undo")
         event_id = int(ev["id"])
-    return {"undone": event_id, "deal": deals.undo_event(event_id)}
+    return dict(undone=event_id, **deals.undo_event(event_id))
 
 
-@app.post("/api/marks/{sku_id}")
-def set_mark(sku_id: int, body: MarkIn) -> Dict[str, Any]:
-    rate = body.rate_paise if body.rate_paise else parse_rate(body.rate)[0]
+@app.get("/api/events")
+def events(limit: Optional[int] = None, offset: int = 0):
+    limit, offset = db.page_args(limit, offset, default=60)
+    total = db.scalar("SELECT COUNT(*) FROM events")
+    rows = db.q("SELECT * FROM events ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))
+    return db.page(db.dicts(rows), total, limit, offset)
+
+
+# ================================================================== settings
+class MarkIn(BaseModel):
+    rate_paise: int
+
+
+class SettingsIn(BaseModel):
+    company_name: Optional[str] = None
+    sauda_prefix: Optional[str] = None
+    alloc_policy: Optional[str] = None
+    allow_short_sales: Optional[bool] = None
+
+
+@app.post("/api/marks/{product_id}")
+def set_mark(product_id: int, body: MarkIn) -> Dict[str, Any]:
+    products.require(product_id)
     with db.tx() as conn:
         conn.execute(
-            "INSERT INTO marks(sku_id,rate_paise,source,updated_at) VALUES (?,?,?,?) "
-            "ON CONFLICT(sku_id) DO UPDATE SET rate_paise=excluded.rate_paise, "
+            "INSERT INTO marks(product_id,rate_paise,source,updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(product_id) DO UPDATE SET rate_paise=excluded.rate_paise, "
             "source=excluded.source, updated_at=excluded.updated_at",
-            (sku_id, rate, "manual", db.now()))
-        db.log(conn, "sku", sku_id, "mark", "Marked at %d" % rate, {"rate_paise": rate})
-    return {"sku_id": sku_id, "rate_paise": rate}
+            (product_id, body.rate_paise, "manual", db.now()))
+        db.log(conn, "product", product_id, "mark", "Marked at %d" % body.rate_paise,
+               {"rate_paise": body.rate_paise})
+    return {"product_id": product_id, "rate_paise": body.rate_paise}
 
 
 @app.post("/api/settings")
@@ -465,7 +501,7 @@ def save_settings(body: SettingsIn) -> Dict[str, str]:
     return db.settings()
 
 
-# ------------------------------------------------------------------ static
+# ================================================================== static
 def build_id() -> str:
     """A token that changes whenever any front-end file changes."""
     latest = 0.0
@@ -482,12 +518,9 @@ def build_id() -> str:
 def index():
     """Serve the shell with every asset URL under a build-stamped prefix.
 
-    The prefix goes in the PATH, not a query string, which matters: a module
-    at /b/<build>/js/app.js resolves its own `import './ui.js'` to
-    /b/<build>/js/ui.js, so the whole module graph is versioned by one
-    substitution. Edit any file and the browser is asking for URLs it has
-    never seen - stale JS becomes structurally impossible rather than a
-    matter of remembering to hard-reload.
+    A module at /b/<build>/js/app.js resolves its own imports under the same
+    prefix, so the whole module graph is versioned by one substitution and a
+    stale JS file becomes structurally impossible.
     """
     with open(os.path.join(WEB, "index.html")) as fh:
         html = fh.read()

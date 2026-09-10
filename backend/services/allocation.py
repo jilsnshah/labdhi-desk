@@ -1,12 +1,12 @@
 """The allocation engine - decides WHICH purchased kilos a sale consumes.
 
-This is the only genuinely hard piece of logic in the system, and the whole
-UX bet is that the trader never has to think about it. He names a buyer, a
-material, a quantity and a rate; the engine proposes the split and shows the
-margin. He accepts, or drags one slider.
+The ticket sends an explicit amount for every lot in the dispatching
+warehouse, so in practice the engine checks and records the trader's own split.
+The fill policies exist for callers that leave lots unspecified (the demo seed,
+re-planning a sale); they are never a question put to the trader.
 
 Everything here is pure: it reads lots and returns a proposal. Nothing is
-written until deals.book_sell() commits it.
+written until deals._book_sell() commits it.
 """
 from __future__ import annotations
 
@@ -14,9 +14,8 @@ from typing import Any, Dict, List, Optional
 
 from .. import db
 from ..money import value_paise, weighted_rate
+from .stock import LOT_SELECT, lots_for
 
-# Fill order for whatever the trader has not chosen himself. This is an
-# internal default, never a question put to the user: oldest stock moves first.
 POLICIES = {
     "fifo":      "Oldest stock first",
     "lifo":      "Newest stock first",
@@ -25,31 +24,6 @@ POLICIES = {
     "spread":    "Pro-rata across every lot",
 }
 DEFAULT_POLICY = "fifo"
-
-
-# ------------------------------------------------------------------ reading
-def available_lots(sku_id: int, include_empty: bool = False,
-                   warehouse: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Open lots of one stock line, optionally only those sitting in one warehouse."""
-    where, args = ["l.sku_id = ?", "l.status = 'open'"], [sku_id]
-    if warehouse:
-        where.append("l.warehouse = ?"); args.append(warehouse)
-    rows = db.q(
-        """
-        SELECT l.*, p.name AS supplier_name, d.ref AS deal_ref, d.deal_date,
-               (l.qty_g - l.qty_allocated_g) AS available_g
-        FROM lots l
-        JOIN parties p ON p.id = l.supplier_id
-        JOIN deals   d ON d.id = l.deal_id
-        WHERE """ + " AND ".join(where) + """
-        ORDER BY d.deal_date, l.id
-        """,
-        args,
-    )
-    lots = [dict(r) for r in rows]
-    if not include_empty:
-        lots = [l for l in lots if l["available_g"] > 0]
-    return lots
 
 
 def _order(lots: List[Dict[str, Any]], policy: str, prefer_supplier: Optional[int]) -> List[Dict[str, Any]]:
@@ -72,44 +46,44 @@ def _neg_date(d: str) -> str:
 
 
 # ------------------------------------------------------------------ the plan
-def suggest(sku_id: int, qty_g: int, policy: str = DEFAULT_POLICY,
+def suggest(product_id: int, qty_g: int, policy: str = DEFAULT_POLICY,
             pins: Optional[List[Dict[str, int]]] = None,
+            warehouse_id: Optional[int] = None,
             exclude_lot_ids: Optional[List[int]] = None,
             prefer_supplier: Optional[int] = None,
             ignore_sale_id: Optional[int] = None) -> Dict[str, Any]:
-    """Return picks covering `qty_g`, honouring pinned lots first.
+    """Return picks covering `qty_g` from one product's lots, pinned lots first.
 
+    With `warehouse_id` only lots sitting in that warehouse are in the pool: a
+    sale is dispatched from one place. A pin naming a lot outside the pool is
+    reported in `rejected`, never silently swapped for another lot.
     `ignore_sale_id` lets an already-booked sale be re-planned: its own
     allocations are handed back to the pool before the new split is computed.
     """
-    lots = available_lots(sku_id)
+    lots = lots_for(product_id, warehouse_id)
     if ignore_sale_id:
         held = db.q(
             "SELECT lot_id, SUM(qty_g) AS q FROM allocations "
             "WHERE sale_deal_id=? AND active=1 GROUP BY lot_id",
             (ignore_sale_id,),
         )
-        back = {int(r["lot_id"]): int(r["q"]) for r in held}
         by_id = {l["id"]: l for l in lots}
-        for lot_id, qty in back.items():
+        for r in held:
+            lot_id, qty = int(r["lot_id"]), int(r["q"])
             if lot_id in by_id:
                 by_id[lot_id]["available_g"] += qty
-            else:
-                row = db.q1(
-                    "SELECT l.*, p.name AS supplier_name, d.ref AS deal_ref, d.deal_date "
-                    "FROM lots l JOIN parties p ON p.id=l.supplier_id "
-                    "JOIN deals d ON d.id=l.deal_id WHERE l.id=?",
-                    (lot_id,),
-                )
-                if row:
-                    lot = dict(row)
-                    lot["available_g"] = qty
-                    lots.append(lot)
+                continue
+            row = db.q1(LOT_SELECT + " WHERE l.id=?", (lot_id,))
+            if row and (not warehouse_id or int(row["warehouse_id"]) == int(warehouse_id)):
+                lot = dict(row)
+                lot["available_g"] = qty
+                lots.append(lot)
 
     excluded = set(exclude_lot_ids or [])
     pool = {l["id"]: l for l in lots if l["id"] not in excluded}
 
     picks: List[Dict[str, Any]] = []
+    rejected: List[int] = []
     remaining = qty_g
 
     # 1. the trader's own choices, exactly as asked, clamped to what exists.
@@ -121,6 +95,8 @@ def suggest(sku_id: int, qty_g: int, policy: str = DEFAULT_POLICY,
         lot_id = int(pin["lot_id"])
         lot = pool.get(lot_id)
         if not lot:
+            if int(pin.get("qty_g") or 0) > 0:
+                rejected.append(lot_id)
             continue
         chosen.add(lot_id)
         if remaining <= 0:
@@ -154,6 +130,7 @@ def suggest(sku_id: int, qty_g: int, policy: str = DEFAULT_POLICY,
         "picks": picks,
         "covered_g": covered,
         "uncovered_g": max(0, qty_g - covered),
+        "rejected": rejected,
         "policy": policy,
         "avg_cost_paise": weighted_rate([(p["qty_g"], p["cost_paise"]) for p in picks]),
     }
@@ -183,6 +160,8 @@ def _pick(lot: Dict[str, Any], qty_g: int, method: str) -> Dict[str, Any]:
         "lot_label": lot["label"],
         "supplier_id": lot["supplier_id"],
         "supplier_name": lot["supplier_name"],
+        "warehouse_id": lot["warehouse_id"],
+        "warehouse": lot.get("warehouse"),
         "deal_ref": lot["deal_ref"],
         "deal_date": lot["deal_date"],
         "cost_paise": lot["rate_paise"],
@@ -206,8 +185,6 @@ def _merge(picks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 # ------------------------------------------------------------------ margin
 def price_plan(plan: Dict[str, Any], sale_rate_paise: int, qty_g: int) -> Dict[str, Any]:
-    """Attach money to a plan. Uncovered kilos are a short position, priced at
-    the last known market so the trader sees the risk instead of a blank."""
     lines = []
     for p in plan["picks"]:
         margin_rate = sale_rate_paise - p["cost_paise"]
@@ -219,24 +196,24 @@ def price_plan(plan: Dict[str, Any], sale_rate_paise: int, qty_g: int) -> Dict[s
         lines.append(line)
 
     covered = plan["covered_g"]
-    margin_paise = sum(l["margin_paise"] for l in lines)
     return {
         "picks": lines,
         "policy": plan["policy"],
         "qty_g": qty_g,
         "covered_g": covered,
         "uncovered_g": plan["uncovered_g"],
+        "rejected": plan.get("rejected", []),
         "avg_cost_paise": plan["avg_cost_paise"],
         "sale_rate_paise": sale_rate_paise,
         "margin_rate_paise": (sale_rate_paise - plan["avg_cost_paise"]) if covered else 0,
-        "margin_paise": margin_paise,
+        "margin_paise": sum(l["margin_paise"] for l in lines),
         "sale_value_paise": value_paise(qty_g, sale_rate_paise),
         "cost_value_paise": sum(l["cost_value_paise"] for l in lines),
     }
 
 
-def preview(sku_id: int, qty_g: int, sale_rate_paise: int, policy: str = DEFAULT_POLICY,
-            pins=None, prefer_supplier=None, ignore_sale_id=None) -> Dict[str, Any]:
-    plan = suggest(sku_id, qty_g, policy, pins=pins,
+def preview(product_id: int, qty_g: int, sale_rate_paise: int, policy: str = DEFAULT_POLICY,
+            pins=None, warehouse_id=None, prefer_supplier=None, ignore_sale_id=None) -> Dict[str, Any]:
+    plan = suggest(product_id, qty_g, policy, pins=pins, warehouse_id=warehouse_id,
                    prefer_supplier=prefer_supplier, ignore_sale_id=ignore_sale_id)
     return price_plan(plan, sale_rate_paise, qty_g)

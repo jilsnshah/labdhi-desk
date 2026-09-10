@@ -1,162 +1,142 @@
 # Labdhi Desk — PVC / polymer trading book
 
-A trading surface, not an ERP. Four screens, two hotkeys, and a lot-level
+A trading surface, not an ERP. Five screens, two hotkeys, and a lot-level
 accounting engine underneath that can tell you where every single kilo came
-from and where it went.
+from, which warehouse it sat in, and where it went.
+
+**How the pieces connect — entities, stock, pagination, migrations — is in
+[ARCHITECTURE.md](ARCHITECTURE.md).**
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m backend.seed --reset     # optional demo book
 .venv/bin/python run.py                      # http://127.0.0.1:8420
-.venv/bin/python -m tests.test_engine        # engine invariants
-.venv/bin/python -m tests.test_api           # every read endpoint
-.venv/bin/python -m tests.test_fields        # paperwork fields + migration
+.venv/bin/python -m tests.test_engine        # engine invariants, records by id
+.venv/bin/python -m tests.test_stock         # warehouse-wise stock, transfers, adjustments, ledger
+.venv/bin/python -m tests.test_fields        # Sauda No., warehouse, GST, payment due
 .venv/bin/python -m tests.test_parties       # party identity + importer
+.venv/bin/python -m tests.test_migrate       # a v1 book upgrades without losing a row
+.venv/bin/python -m tests.test_api           # every endpoint, every list is a page
 ```
+
+Every test module also runs against Postgres: `DATABASE_URL=postgres://... python -m tests.<module>`.
 
 ---
 
 ## What I changed from the brief, and why
 
-**1. Parties need no setup; the material tree does.** A supplier or customer
-exists the moment you name it in a deal — a misspelling there costs you one
-duplicate row. A *manufacturer* is different: typed free-hand it arrives as
-"Reliance", "reliance " and "RIL", and one position silently becomes three. So
-materials, grades and manufacturers are a maintained tree on the **Setup**
-screen, and the ticket offers them as a closed list. New entries can still be
-added from inside the ticket; they write to the same tree.
+**1. Party, warehouse and product are records, not fields.** A ticket never
+takes a typed name. You pick the party, the product and the warehouse from
+their lists. One that isn't there yet is added through its form (**Add new
+party / product / warehouse**) without leaving the ticket, and comes straight
+back selected. The same forms edit the same records in **Setup**, so a firm, a
+godown or a grade exists exactly once, and correcting it corrects every deal.
 
 **2. Suppliers and customers are one table.** In this trade the same firm sells
 you HS1000 in March and buys it back in May. Two tables would have meant two
-records for one relationship and a broken counterparty P&L.
+records for one relationship and a broken counterparty P&L. A transporter is a
+party too.
 
 **2a. Supplier and manufacturer are never the same field.** The supplier is the
 party you bought from; the manufacturer is who made the resin. You buy
 Chemplast HS1000 *from* Shreeji Polymers, and next week the same grade from
 Rajdhani. Confusing the two would make cost history meaningless.
 
-**3. `98.25+` is parsed as "basic rate, GST extra"** and stored as a flag.
+**3. Stock is kept warehouse by warehouse.** A purchase is received into one
+warehouse; a sale is dispatched from one warehouse and can only draw on lots
+sitting there. Transfers and adjustments move stock between and within
+warehouses without losing which purchase it came from.
+
+**4. `98.25+` means "basic rate, GST extra"** and is stored as a flag.
 Margins are computed on basic rates throughout, because GST is pass-through.
-Per your instruction freight, delivery, transport, payment and e-way are
-**recorded but not costed** — they sit on the deal as text. When you want them
-in the landed cost later, the change is one column on `lots` and one line in
-the margin function; nothing else moves.
+Freight, delivery, transport, payment and e-way are **recorded but not
+costed** — they sit on the deal as text.
 
-**4. Short selling is off.** The engine can represent an uncovered sale — the
-column and the alert exist, because a book can end up short through a cancelled
-purchase — but the interface will not create one. A sale is either fully
-covered by real lots or it does not book. `allow_short_sales` stays `0`.
+**5. Short selling is off.** A sale is either fully covered by real lots in its
+warehouse or it does not book. `allow_short_sales` stays `0`.
 
-**5. Everything is reversible.** Booking writes an undoable event; `U` or the
-toast reverses the last one. Cancelling a sale hands the exact grams back to
-the exact lots they came from. Cancelling a *purchase* whose material is
-already sold is refused, and the error names the sales blocking it.
+**6. Everything is reversible.** Booking, transferring and adjusting each write
+an undoable event; `U` or the toast reverses the last one. Cancelling a sale
+hands the exact grams back to the exact lots they came from. Cancelling a
+*purchase* whose stock is already sold or moved is refused, and the error names
+what blocks it.
 
 ---
 
 ## The interaction model
 
-Booking a sale is four taps and zero navigation:
+Booking a sale:
 
 ```
 S                  → sell screen opens
-Mahavir Pipes      → tap a chip (recent counterparties first)
-PVC                → material
-S65                → grade, narrowed to grades of PVC
-Reliance  5T       → manufacturer, narrowed again, with stock on the chip
-50% / All          → tap a quantity chip, or ± by the tonne
-₹97.25             → ± by 25 paise; the margin moves as you move it
-⌘↵                 → booked
+Mahavir Pipes      → search or tap from the party list  (+ Add new party)
+PVC → S65 → Reliance   material, grade, manufacturer — only products you hold
+Mundra  12T        → dispatch from: only warehouses holding it (skipped if one)
+50% / All          → quantity, capped at what Mundra holds
+₹97,250            → rate per MT; the margin moves as you move it
+which lots         → type how much comes out of each lot in Mundra
+Book sale          → booked
 ```
 
-The three material levels cascade: choosing PVC narrows the grade list, and
-choosing S65 narrows the manufacturer list to just the makers you hold that
-grade from. On a sale only lines with stock are offered, so it is impossible to
-walk the tree into a dead end.
+A purchase is the same with **Receive into** for the warehouse, and **Add new
+product / warehouse** available at each step.
 
-Only the slot you are on is bright; finished slots collapse to a chip you can
-tap to change. Logistics live behind one collapsed `details`. Nothing is typed
-that can be tapped.
-
-The hard part of a sell is not the buyer or the rate — it is deciding how much
-of it comes out of each lot you are sitting on. Two earlier versions of this
-screen tried to be clever about that and both failed. Auto-allocating and then
-letting him nudge it meant editing one row silently rewrote the others. Making
-him tap lots in a priority order removed the arithmetic but also removed the
-thing he actually wants to say: *three tonnes out of this one*.
-
-So the split is now plain, and the plainness is the point:
+The hard part of a sale is deciding how much comes out of each lot you are
+sitting on, so the split is plain:
 
 ```
- WHICH STOCK GOES OUT                              ┌──────────────────┐
- ₹97.40   Shreeji Polymers  10 MT   +₹5.85/kg      │ LEFT TO ASSIGN   │
+ WHICH STOCK GOES OUT OF MUNDRA                    ┌──────────────────┐
+ ₹97,400  Shreeji Polymers  10 MT   +₹5,850/MT     │ LEFT TO ASSIGN   │
                                     [  5000 ] kg   │     12 MT        │
- ₹99.10   Shreeji Polymers   7 MT   +₹4.15/kg      │    of 24 MT      │
-                                    [     0 ] kg   │ ▓▓▓▓▓▓▓░░░░░░░░  │
- ₹99.10   Vora Polychem     12 MT   +₹4.15/kg      │  12 MT assigned  │
-                                    [  7000 ] kg   │  cost ₹98.11     │
- ₹100.00  Rajdhani Traders  18 MT   +₹3.25/kg      │    Clear all     │
-                                    [     0 ] kg   └──────────────────┘
-                                       fill rest      ↑ sticky, always in view
+ ₹99,100  Vora Polychem     12 MT   +₹4,150/MT     │    of 24 MT      │
+                                    [  7000 ] kg   │ ▓▓▓▓▓▓▓░░░░░░░░  │
+ ₹1,00,000 Rajdhani Traders 18 MT   +₹3,250/MT     │  12 MT assigned  │
+                                    [     0 ] kg   │    Clear all     │
+                                       fill rest   └──────────────────┘
 ```
 
-Every lot starts at **zero**. He types into the ones he wants. Rows are ordered
-cheapest first, and two lots at the same rate stay tellable apart by supplier,
-purchase reference, date and remaining stock. `fill rest` on any row drops the
-outstanding balance into it, so the last row never needs mental arithmetic.
-
-**Left to assign** sits beside the rows and is `position: sticky`, so it never
-scrolls away while he works down a long list. It has exactly one target: zero.
-Type more than a lot holds and the box stops at what it holds, immediately —
-not on blur, so the figure on screen is always the figure that will be sold.
+Every lot starts at **zero**. He types into the ones he wants; `fill rest`
+drops the outstanding balance into a row. **Left to assign** is sticky and has
+exactly one target: zero.
 
 ### No short, no over — enforced in three places
 
-* The **quantity** field cannot exceed what he actually holds, so a sale can
-  never be written for stock that does not exist.
+* The **quantity** cannot exceed what the dispatching warehouse holds.
 * The **book button stays locked** unless assigned equals the sale exactly.
-  Under, and it says how much is still to assign; over, and it says how much to
-  take back out.
-* The **server refuses anyway**: `allow_short_sales` is off, so a sale that
-  cannot be covered from real lots is rejected with the shortfall named, no
-  matter what any client sends.
+* The **server refuses anyway**: a sale that cannot be covered from real lots in
+  its warehouse is rejected with the shortfall and the warehouse's stock named,
+  and a pin on a lot in another warehouse is refused.
 
 ### Screens
 
 | | |
 |---|---|
-| **Desk** `1` | Open P&L, realised today, and one card per position. Each card carries the *lot ladder* — every purchase lot as a segment, coloured cheap-green to dear-amber, so your cost structure is a picture, not a table. |
-| **Flow** `2` | The lineage graph. Purchase lots on the left, sales on the right, ribbons in between sized by quantity and coloured by margin. Hatched blocks are stock still sitting. Click anything for the full trace. |
-| **Search** | Every list has one. Positions match on material, grade, manufacturer *or* the supplier the stock came from — "the DCW S65" and "the stuff from Vora" both find it. The tape additionally matches deal reference, counterparty and transporter. |
-| **Setup** `4` | The master tree: materials, the grades under each, and the manufacturers who make each grade. Stock and deal counts show against every node, and anything already traded refuses to be deleted. |
-| **Tape** `3` | Every deal, newest first. Click one to unfold its lineage — a sale shows the lots it came from, a purchase shows the buyers it went to. Reset an allocation or cancel from there. |
-| **Position** | Click a card: the ladder full-width, then every lot with a fill bar and the exact list of who bought which kilos at what rate for what margin. |
+| **Desk** `1` | Open P&L, realised today, and one card per product with its per-warehouse stock and the *lot ladder* — every lot as a segment, coloured cheap-green to dear-amber. |
+| **Stock** `2` | Warehouse cards; stock per product per warehouse; open a row for its lots (**Move**, **Adjust**) and its ledger with a running balance; every movement below. |
+| **Flow** `3` | The lineage graph. Purchases left, sales right, ribbons sized by quantity and coloured by margin. |
+| **Tape** `4` | Every sauda as a table row: Sauda No., Date, Type, Party, Product / Grade, Qty (MT), Rate (₹/MT), Warehouse, Status, Delivery, Margin. Open a row for every recorded field and the lineage. |
+| **Setup** `5` | Parties, Products, Warehouses, Materials & grades, Manufacturers, States — each searchable and paged. |
+| **Position** | Click a card: the ladder full-width, per-warehouse stock, then every lot with where it went. |
 
-Hotkeys: `B` buy · `S` sell · `U` undo last booking · `1/2/3` screens · `Esc`
-close · `⌘↵` confirm.
+Hotkeys: `B` buy · `S` sell · `U` undo last action · `1`–`5` screens · `Esc` close.
+
+The phone gets its own app on the same records: one decision per screen, a
+numeric pad, Buy and Sell under the thumb, forms as bottom sheets.
 
 ---
 
 ## Data model
 
-```
-parties ──┬── deals ──┬── lots ────┐
-          │  (buy)    │            │  (a booked BUY mints exactly one lot)
-          │           └── rate, qty, qty_allocated
-          │                        │
-          └── deals ──── allocations ───┘   ← the edge of the lineage graph
-             (sell)      qty_g, cost_paise, sale_rate_paise  (SNAPSHOTS)
-```
+The short version (full map in [ARCHITECTURE.md](ARCHITECTURE.md)):
 
-* `skus` — **material x grade x manufacturer**, the tradeable atom and the unit
-  inventory is kept in. PVC S65 from Reliance and PVC S65 from DCW are separate
-  positions with separate costs, enforced by `UNIQUE (material, grade, manufacturer)`
-* `catalog_materials` / `catalog_grades` / `catalog_makers` — the master tree
-  behind the Setup screen. Entries can exist with no stock and no history; ones
-  that have been traded cannot be deleted
-* `marks` — current market rate per material, set by your last sale or by hand;
-  drives unrealised P&L, and rolls back if that sale is cancelled
-* `events` — append-only audit of every mutation, some flagged undoable
+```
+states ── parties ──┐                      ┌── warehouses
+                    ├── deals ── lots ─────┤   (a BUY books a lot in its warehouse;
+materials ─ grades ─┤    │        │        │    a transfer makes a child lot elsewhere)
+manufacturers ──────┴ products    │        │
+                         └──── allocations ┘   ← the edge of the lineage graph
+                                  stock_moves  ← transfers and adjustments
+```
 
 **Allocations carry snapshots of cost and sale rate, not references.** History
 must never change under you because a lot was edited later.
@@ -168,44 +148,34 @@ must never change under you because a lot was edited later.
 | stored as | unit | example |
 |---|---|---|
 | quantity | grams | 20,000 kg → `20_000_000` |
-| rate | paise per kg | ₹98.25 → `9825` |
+| rate | paise per kg | ₹98,250/MT → `9825` |
 | value | paise | ₹19,65,000 → `196_500_000` |
 
-No float ever reaches the database, so 5,000 kg + 8,000 kg + 7,000 kg is
-20,000 kg forever. Rounding is half-up in one function. Input parsing accepts
-`20,000 kg`, `20 MT`, `20t`, `40 bags`, `₹98.25+`, `Rs 102`.
+No float ever reaches the database. Rates are shown per MT; one paisa per kg is
+₹10 per MT, so a per-MT figure that is not a multiple of ₹10 is refused rather
+than rounded.
 
 ### The invariant the tests defend
 
-> Every gram bought is either still in stock or allocated to exactly one sale.
+> Every gram bought (plus found, less written off) is either still in stock or
+> allocated to exactly one sale.
 
-`assert_conserved()` in `tests/test_engine.py` checks it after every mutating
-test — sale, cancel, re-allocate, undo. If that identity ever breaks, the
-margins are fiction.
+`conserved()` in `tests/common.py` checks it after every mutating test — sale,
+cancel, re-allocate, transfer, adjustment, undo, migration.
 
 ---
 
 ## The allocation engine
 
 `backend/services/allocation.py` is pure: it reads lots, returns a proposal,
-writes nothing. `deals.book_sell()` is the only thing that commits.
+writes nothing. The pool is the product's lots **in the sale's warehouse**.
 
-1. **The trader's own picks first**, honoured exactly and clamped only to what
-   the lot actually holds. A chosen lot is then removed from the auto-fill
-   pool, so his number is the final word on that lot — typing `0` is how you
-   exclude a lot entirely.
-2. **Then the fill order takes the rest** — oldest stock first. This only runs
-   for the opening proposal; once the trader has touched the split, the client
-   sends every lot explicitly and no auto-fill happens at all. The other orders
-   (newest, cheapest, dearest, pro-rata) exist in the engine and are used by the
-   seed script, but nothing in the interface exposes them.
-3. **Whatever is left over is a short**, reported as `uncovered_g` rather than
-   quietly rounded away.
-
-`preview()` prices a plan without touching the database — that is what makes
-the margin move live while you drag the rate. `reallocate()` re-runs it on a
-booked sale: old allocation rows go `active=0` rather than being deleted, so
-the audit trail survives the change.
+1. **The trader's own picks first**, honoured exactly and clamped to what the lot
+   holds. A chosen lot leaves the auto-fill pool, so typing `0` excludes it.
+2. **Then oldest stock first** for anything unspecified — only callers that leave
+   lots out (the seed, re-planning) ever reach this; the ticket sends every lot.
+3. **Whatever is left over is a short**, reported rather than rounded away, and
+   refused at booking.
 
 ---
 
@@ -213,79 +183,71 @@ the audit trail survives the change.
 
 ```
 backend/
-  schema.sql          every table, commented
+  schema.sql          every table and the v_products view, commented
+  migrate.py          v1 → v2 upgrade, runs on boot, no-op once current
+  gst.py              GSTIN check digit, PAN, state codes
   money.py            integer money + unit parsing
-  db.py               connections, transactions, audit log
-  api.py              HTTP surface
+  db.py               connections, transactions, paging, audit log
+  api.py              HTTP surface: one list contract, one record contract
   seed.py             demo book
+  import_parties.py   Tally ledger import
   services/
-    catalog.py        parties + skus, find-or-create
+    parties.py        parties + states
+    warehouses.py     warehouses
+    products.py       materials, grades, manufacturers, products
+    stock.py          lots, stock by warehouse, ledger, transfers, adjustments
     allocation.py     the engine
     deals.py          lifecycle: draft → booked → cancelled
-    inventory.py      positions, lot ladder, lineage graph
-    dashboard.py      desk summary + attention
-web/                  vanilla ES modules, no build step
-tests/test_engine.py  17 invariant tests
+    inventory.py      positions, lineage graph
+    dashboard.py      summary, attention, counterparties
+web/js/
+  lists.js            the one paged list
+  forms.js            the one form engine + every record form and picker
+  trade.js / mticket.js   desktop / phone ticket
+  desk, stock, flow, tape, setup .js   desktop screens;  mobile.js  phone screens
+tests/                engine, stock, fields, parties, migrate, api (+ fixtures/)
 ```
 
-No ORM: the SQL is explicit because this is money. No frontend framework: four
-screens do not need one, and every interaction lands inside a frame.
+No ORM: the SQL is explicit because this is money. No frontend framework and no
+build step.
 
 ---
 
 ## Built for a book that keeps growing
 
-Three things would have fallen over at a few thousand trades, so none of them
-loads everything:
+**Every list is paged the same way** — `?q=&limit=&offset=` in, `{items, total,
+has_more}` out — and every screen shows `25 of 1021` and a *Load more*. Search
+runs server-side, so filtering never depends on having loaded the rows first.
 
-**Lists are paged.** Positions and the tape fetch one page and append on
-*Load more*, with `Showing 60 of 176` under them. Search runs server-side, so
-filtering does not depend on having loaded the rows first.
+**Totals are computed in SQL, not by summing the page.**
 
-**Totals are computed in SQL, not by summing the page.** `inventory.totals()`
-returns stock, stock value, open and realised P&L across the whole book in two
-queries. Summing a paginated list would have quietly under-reported the moment
-the second page existed — the sort of bug that looks like a rounding error and
-is not.
-
-**The lineage graph is a window, not the whole book.** It takes a date range
-(7 / 30 / 90 days, All time, or explicit dates) and is anchored on *sales* in
-that period. The purchase lots feeding those sales are pulled in whatever their
-own date, because a sale whose source is off-screen is not a lineage, it is a
-dangling arrow. Purchases made inside the window show too, so material bought
-and not yet sold still appears as idle stock. Beyond 60 sales it renders the
-newest and says so rather than drawing an unreadable mat.
+**The lineage graph is a window, not the whole book** — a date range anchored on
+sales, with the purchases that fed them pulled in whatever their date.
 
 ## Deal paperwork
 
-Every deal carries the fields the confirmation needs, all optional except where
-noted:
-
 | Field | Rule |
 |---|---|
-| **Sauda No.** | `LE/26-27/0001` — one series for buys and sells, restarting each 1 April (Indian financial year). The next number is one past the highest used that year, so a cancelled deal or a hand-typed number never causes a collision. Editable; must be unique. The prefix is the `sauda_prefix` setting. |
-| **Warehouse** | Belongs to the **lot**, not the stock line — the same PVC HS1000 can sit in Mundra and Aslali at once. A purchase names where it lands; a sale records wherever its lots actually sat (`Aslali, Mundra` if it drew on both). Desktop can narrow a sale to one warehouse. |
-| **Rate** | Entered and shown **per MT**, stored as paise per kg. One paisa/kg is ₹10/MT, so per-MT entry is exact in ₹10 steps; a finer figure is refused and Book locks — it is never silently rounded. |
-| **GST extra** | Checkbox, on by default ("98.25+"). Recorded only; margin maths is on basic rates. |
-| **Payment due** | A calendar date, with Today / +7 / +15 / +30 / +45 day shortcuts counted from the deal date. |
+| **Sauda No.** | `LE/26-27/0001` — one series for buys and sells, restarting each 1 April. The next number is one past the highest used that year. Editable; must be unique. The prefix is the `sauda_prefix` setting. |
+| **Warehouse** | A warehouse record. Buy: where it is received. Sell: where it is dispatched from, and the only place its lots can come from. |
+| **Rate** | Entered and shown **per MT**, stored as paise per kg; exact in ₹10 steps. |
+| **GST extra** | Checkbox, on by default. Recorded only. |
+| **Payment due** | A calendar date, with Today / +7 / +15 / +30 / +45 day shortcuts. |
 | **Ex-Place** | Free text — pricing basis, e.g. Mundra. |
-
-Warehouses (name + location) are kept in **Setup**. Renaming one rewrites every
-lot and deal that records it, in one transaction.
+| **Transporter** | A party record, picked from the same list. |
+| **Freight / Delivery by** | Buyer or Seller. *Delivery* is the tape's Delivery column. |
 
 ## Parties
 
-A party is **name, phone, address, GSTIN, PAN** — no buyer/seller split, because
-the same firm sits on either side of a deal from one week to the next.
+A party is **name, GSTIN, PAN, state, phone, address** — no buyer/seller split.
 
-* **Unique by GSTIN.** A second party cannot take a GSTIN that is in use.
-* **PAN comes from the GSTIN** (characters 3–12) and cannot disagree with it. It
-  only takes typing for a party with no GSTIN.
-* **GSTINs are check-digit validated** when typed, so a one-key typo is refused
-  instead of becoming a second, nearly identical party.
-* **Branches of one firm are separate parties** — two GSTINs sharing a PAN, one
-  per state. They may share a name; the second is told apart internally by its
-  GSTIN.
+* **Picked, never typed, in a ticket.** **Add new party** opens the form.
+* **Unique by GSTIN.** The form checks as you type and names the party that
+  already holds a GSTIN, with a **Use it** button. The same goes for a name.
+* **PAN and state come from the GSTIN** and cannot disagree with it. Without a
+  GSTIN they are entered; state is chosen from the GST state list.
+* **GSTINs are check-digit validated** when typed.
+* **Branches of one firm are separate parties** — two GSTINs sharing a PAN.
 
 ### Importing parties from Tally
 
@@ -295,16 +257,14 @@ the same firm sits on either side of a deal from one week to the next.
 .venv/bin/python -m backend.import_parties           "labdhi exim ledger address.xlsx" "om ledger address.xlsx"
 ```
 
-Reads Tally's *Updation of Party GSTIN/UIN* export. Numbered rows are parties;
-the un-numbered `DELIVERY` rows beneath them are ship-to addresses and are
-skipped; rows whose State is *Not Applicable* are accounting ledgers and are
-excluded. Duplicates collapse on GSTIN across both files, keeping the fuller
-address and never a `- OLD` name. The dry run lists anything needing a human:
-GSTINs failing their check digit, and **different-looking firms sharing one
-GSTIN** — which cannot be legitimate, so one of them is keyed wrongly in Tally.
+The import reads Tally's *Updation of Party GSTIN/UIN* export:
 
-Re-running is safe: nothing is created twice, and an import never blanks a
-field already filled in (the sheets carry no phone numbers).
+- Numbered rows are parties.
+- `DELIVERY` rows are ship-to addresses and are skipped.
+- *Not Applicable* rows are accounting ledgers and are excluded.
+- Duplicates collapse on GSTIN across both files.
+
+Re-running is safe. The importer is the one place repeats merge automatically.
 
 > **The ledgers are private.** They hold real customer names, addresses and
 > GSTINs, and this repository is public. `*.xlsx` is gitignored — never commit
@@ -312,22 +272,23 @@ field already filled in (the sheets carry no phone numbers).
 
 ## Schema changes on a live database
 
-`CREATE TABLE IF NOT EXISTS` never alters a table that already exists, so
-columns added after the first deploy live in `db.MIGRATIONS` and are added in
-place on boot, once. `tests/test_fields.py` builds a database from the old
-schema and proves it upgrades without losing a row. Indexes on new columns are
-created in `db.migrate()`, never in `schema.sql`, which runs first and would
-abort on a column that does not exist yet.
+`backend/migrate.py` runs on every boot. A version-1 book is rebuilt in one
+transaction:
+
+- Ids are kept.
+- Text warehouses become warehouse records.
+- Stock with no warehouse goes into **Main**.
+- The catalogue becomes products.
+
+`tests/test_migrate.py` builds both historic shapes from `tests/fixtures/` on
+SQLite or Postgres and proves nothing is lost. Run it against a copy of
+production before deploying.
 
 ## Known edges
 
 * Single-user. SQLite in WAL mode with `BEGIN IMMEDIATE` around every write is
   correct for one desk; a second trader needs Postgres and a lock strategy.
-* Search is `LIKE '%term%'`, which cannot use an index. Fine to five figures of
-  deals on SQLite; past that it wants FTS5 or a trigram index.
-* Payments and deliveries are not tracked yet — the deal records the terms as
-  text. Both are additive: a `payments` table against `deals`, a `movements`
-  table against `lots`.
-* Re-allocating a booked sale from the Tape only resets it to the automatic
-  fill. Re-opening the price rack on a booked sale is the better interaction
-  and is not built yet.
+* Search is `LIKE '%term%'`. Fine to five figures of deals; past that it wants
+  FTS5 or a trigram index.
+* Payments and physical deliveries against a sauda are not tracked yet — the
+  deal records the terms. Both are additive tables against `deals`.

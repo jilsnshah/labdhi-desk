@@ -1,265 +1,220 @@
-// Setup: the master tree of material -> grade -> manufacturer.
-//
-// This exists because "manufacturer" is a word people type differently every
-// time. Registered once here, it becomes a closed list in the ticket, so the
-// same maker cannot arrive as "Reliance", "reliance " and "RIL" and split one
-// position into three.
+// Setup: the master records. Each tab is one kind of record - searchable,
+// paged, added and edited through the same form a ticket's "Add new" opens.
 import { h, mount, toast, searchBar } from './ui.js';
 import * as f from './fmt.js';
 import { api } from './api.js';
+import { pagedList, counter } from './lists.js';
+import { openForm, partyForm, productForm, warehouseForm } from './forms.js';
 
-let openMaterial = null, openGrade = null, filter = '';
+export const TABS = [
+  ['parties', 'Parties'], ['products', 'Products'], ['warehouses', 'Warehouses'],
+  ['materials', 'Materials & grades'], ['manufacturers', 'Manufacturers'], ['states', 'States']
+];
 
-export async function renderSetup(root, ctx) {
-  const [{ tree: all }, { parties }, { warehouses }] = await Promise.all(
-    [api.catalogTree(), api.partyList(), api.warehouses()]);
-  const term = filter.toLowerCase();
-  const hit = (...parts) => !term || parts.some(x => (x || '').toLowerCase().includes(term));
-  const tree = !term ? all : all
-    .map(m => {
-      const grades = m.grades.filter(g =>
-        hit(m.material, g.grade) || g.manufacturers.some(k => hit(k.manufacturer)));
-      return hit(m.material) || grades.length ? { ...m, grades } : null;
-    })
-    .filter(Boolean);
-  const view = h('div', { class: 'view' });
-  mount(root, view);
+export function renderSetup(root, ctx) {
+  const tab = ctx.setupTab || 'parties';
+  const body = h('div', {});
+  mount(root, h('div', { class: 'view' },
+    h('div', { class: 'tabs' }, ...TABS.map(([key, label]) => h('button', {
+      class: 'tab' + (tab === key ? ' on' : ''),
+      onclick: () => { ctx.setupTab = key; ctx.setupFilter = null; renderSetup(root, ctx); }
+    }, label))),
+    body));
+  SECTIONS[tab](body, ctx, () => renderSetup(root, ctx));
+}
 
-  const refresh = () => renderSetup(root, ctx);
-  const add = async (body, what) => {
-    try { await api.addCatalog(body); toast(`Added ${what}`); refresh(); }
-    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
-  };
-  const remove = async (body, what) => {
-    if (!window.confirm(`Remove ${what}?`)) return;
-    try { await api.removeCatalog(body); toast(`Removed ${what}`); refresh(); }
-    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
-  };
+// Removing is refused by the server while anything still refers to a record;
+// the reason comes back and is shown as it is.
+export async function removeRecord(label, call, after) {
+  if (!window.confirm(`Remove ${label}?`)) return;
+  try { await call(); toast(`Removed ${label}`); after(); }
+  catch (err) { toast(err.message, { kind: 'err', ms: 9000 }); }
+}
 
-  const saveParty = async (p, form) => {
-    try {
-      await api.partySave({ ...form, id: p ? p.id : undefined });
-      toast(p ? 'Saved' : `Added ${form.name}`);
-      refresh();
-    } catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
-  };
-  const dropParty = async p => {
-    if (!window.confirm(`Remove ${p.name}?`)) return;
-    try { await api.partyRemove(p.id); toast(`Removed ${p.name}`); refresh(); }
-    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
-  };
+function section(body, { title, hint, addLabel, onAdd, placeholder, head, load, row, filters, pageSize = 25 }) {
+  let query = '', extra = {};
+  const count = counter();
+  const list = pagedList({ pageSize, head, load, row: item => row(item, () => list.reload()), onPage: count.update });
+  const reload = () => list.reload({ q: query, ...extra });
+  mount(body,
+    h('div', { class: 'section-head' }, h('h2', {}, title), h('i', { class: 'rule' }), count,
+      onAdd ? h('button', { class: 'chip on small', onclick: async () => { if (await onAdd()) reload(); } }, addLabel) : null),
+    hint ? h('div', { class: 'section-hint' }, hint) : null,
+    h('div', { class: 'setup-tools' },
+      searchBar(placeholder, t => { query = t; reload(); }),
+      filters ? filters(v => { extra = v; reload(); }) : null),
+    list.el);
+  return { reload, setExtra: v => { extra = v; } };
+}
 
-  // A warehouse is a name and a location. Renaming one is carried through every
-  // lot and deal that already records it, on the server, in one transaction.
-  function whRow(w) {
-    const box = (value, placeholder, width) => h('input', {
-      class: 'ghost-input', value: value || '', placeholder,
-      style: { textAlign: 'left', width, fontFamily: 'var(--sans)' }
+const acts = (...btns) => h('td', { class: 'acts' }, ...btns);
+const act = (label, fn, cls = '') => h('button', { class: 'row-act ' + cls, onclick: e => { e.stopPropagation(); fn(); } }, label);
+
+const SECTIONS = {
+  parties(body, ctx) {
+    const s = section(body, {
+      title: 'Parties', addLabel: '+ Add party', onAdd: () => partyForm(),
+      hint: 'One record per firm — buyer, seller or transporter. Identity is the GSTIN.',
+      placeholder: 'Search name, GSTIN, phone or address…',
+      head: ['Party', 'GSTIN', 'PAN', 'State', 'Phone', 'Address', { label: 'Deals', cls: 'r' }, ''],
+      load: p => api.parties(p),
+      row: (p, again) => h('tr', {},
+        h('td', { class: 'strong' }, p.name),
+        h('td', { class: 'mono' }, p.gstin || h('span', { class: 'dim' }, '—')),
+        h('td', { class: 'mono' }, p.pan || ''),
+        h('td', {}, p.state || ''),
+        h('td', { class: 'nowrap' }, p.phone || ''),
+        h('td', { class: 'addr', title: p.address || '' }, p.address || ''),
+        h('td', { class: 'r mono' }, p.deal_count || ''),
+        acts(act('Edit', async () => { if (await partyForm(p)) again(); }),
+             act('×', () => removeRecord(p.name, () => api.partyRemove(p.id), again), 'x'))),
+      filters: set => {
+        const sel = h('select', { class: 'setup-select', onchange: e => set(e.target.value ? { state_code: e.target.value } : {}) },
+          h('option', { value: '' }, 'All states'));
+        api.states({ limit: 100 }).then(r => {
+          for (const st of r.items.filter(x => x.parties)) sel.appendChild(h('option', { value: st.code }, `${st.name} (${st.parties})`));
+          if (ctx.setupFilter) { sel.value = ctx.setupFilter; set({ state_code: ctx.setupFilter }); }
+        });
+        return sel;
+      }
     });
-    const name = box(w && w.name, 'Warehouse name, e.g. Mundra', '240px');
-    const location = box(w && w.location, 'Location / address', '340px');
-    const save = async () => {
-      const body = { name: name.value.trim(), location: location.value.trim() };
-      if (!body.name) { toast('Name is required', { kind: 'err' }); return; }
-      if (w) body.old_name = w.name;
-      try {
-        await api.saveWarehouse(body);
-        toast(w ? (w.name !== body.name ? `Renamed to ${body.name}` : 'Saved') : `Added ${body.name}`);
-        refresh();
-      } catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
-    };
-    return h('div', { class: 'party-row' }, name, location,
-      w ? h('span', { class: 'dim', style: { fontSize: '13px' } },
-            w.stock_g ? `${f.qty(w.stock_g)} in stock` : 'empty') : null,
-      h('button', { class: 'chip on', style: { marginLeft: 'auto' }, onclick: save }, w ? 'Save' : 'Add'),
-      w ? h('button', { class: 'setup-x', onclick: () => dropWh(w.name) }, '×') : null);
+    if (ctx.setupFilter) s.setExtra({ state_code: ctx.setupFilter });
+    s.reload();
+  },
+
+  products(body) {
+    section(body, {
+      title: 'Products', addLabel: '+ Add product', onAdd: () => productForm(),
+      hint: 'A product is a material, a grade and the manufacturer who made it. Stock is kept per product, per warehouse.',
+      placeholder: 'Search material, grade or manufacturer…',
+      head: ['Product', 'Material', 'Grade', 'Manufacturer', 'Packing', { label: 'In stock (MT)', cls: 'r' }, { label: 'Deals', cls: 'r' }, ''],
+      load: p => api.products(p),
+      row: (p, again) => h('tr', {},
+        h('td', { class: 'strong' }, p.display),
+        h('td', {}, p.material), h('td', {}, p.grade), h('td', {}, p.manufacturer),
+        h('td', {}, p.packing || ''),
+        h('td', { class: 'r mono' }, p.stock_g ? f.mt(p.stock_g) : ''),
+        h('td', { class: 'r mono' }, p.deal_count || ''),
+        acts(act('Edit', async () => { if (await productForm(await api.product(p.id))) again(); }),
+             act('×', () => removeRecord(p.display, () => api.productRemove(p.id), again), 'x'))),
+      filters: set => {
+        const sel = h('select', { class: 'setup-select', onchange: e => set(e.target.value ? { material_id: e.target.value } : {}) },
+          h('option', { value: '' }, 'All materials'));
+        api.materials({ limit: 200 }).then(r => r.items.forEach(m => sel.appendChild(h('option', { value: m.id }, m.name))));
+        return sel;
+      }
+    }).reload();
+  },
+
+  warehouses(body) {
+    section(body, {
+      title: 'Warehouses', addLabel: '+ Add warehouse', onAdd: () => warehouseForm(),
+      hint: 'Your own stock locations. Every lot sits in one; a sale ships from one.',
+      placeholder: 'Search name or address…',
+      head: ['Warehouse', 'Address', { label: 'In stock (MT)', cls: 'r' }, { label: 'Value', cls: 'r' },
+             { label: 'Products', cls: 'r' }, { label: 'Lots', cls: 'r' }, ''],
+      load: p => api.warehouses(p),
+      row: (w, again) => h('tr', {},
+        h('td', { class: 'strong' }, w.name),
+        h('td', { class: 'addr' }, w.address || ''),
+        h('td', { class: 'r mono' }, f.mt(w.stock_g)),
+        h('td', { class: 'r mono' }, f.inr(w.stock_value_paise, { compact: true })),
+        h('td', { class: 'r mono' }, w.products),
+        h('td', { class: 'r mono' }, w.lots),
+        acts(act('Edit', async () => { if (await warehouseForm(w)) again(); }),
+             act('×', () => removeRecord(w.name, () => api.warehouseRemove(w.id), again), 'x')))
+    }).reload();
+  },
+
+  materials(body) {
+    section(body, {
+      title: 'Materials', addLabel: '+ Add material',
+      onAdd: () => nameForm('Add material', '', 'e.g. LLDPE', v => api.materialSave({ name: v })),
+      hint: 'Open a material to manage its grades.',
+      placeholder: 'Search material…',
+      head: ['Material', { label: 'Grades', cls: 'r' }, { label: 'Products', cls: 'r' }, { label: 'In stock (MT)', cls: 'r' }, ''],
+      load: p => api.materials(p),
+      row: (m, again) => {
+        let open = null;
+        const tr = h('tr', { class: 'click' },
+          h('td', { class: 'strong' }, '▸ ', m.name),
+          h('td', { class: 'r mono' }, m.grades), h('td', { class: 'r mono' }, m.products),
+          h('td', { class: 'r mono' }, m.stock_g ? f.mt(m.stock_g) : ''),
+          acts(act('Rename', async () => {
+            if (await nameForm('Rename material', m.name, '', v => api.materialSave({ id: m.id, name: v }))) again();
+          }), act('×', () => removeRecord(m.name, () => api.materialRemove(m.id), again), 'x')));
+        tr.addEventListener('click', () => {
+          if (open) { open.remove(); open = null; return; }
+          const inner = h('div', { class: 'detail' });
+          grades(inner, m);
+          open = h('tr', { class: 'deal-detail' }, h('td', { colspan: 5 }, inner));
+          tr.after(open);
+        });
+        return tr;
+      }
+    }).reload();
+  },
+
+  manufacturers(body) {
+    section(body, {
+      title: 'Manufacturers', addLabel: '+ Add manufacturer',
+      onAdd: () => nameForm('Add manufacturer', '', 'e.g. Reliance', v => api.manufacturerSave({ name: v })),
+      hint: 'Who made the resin — never the party you trade with. A rename fixes every product at once.',
+      placeholder: 'Search manufacturer…',
+      head: ['Manufacturer', { label: 'Products', cls: 'r' }, { label: 'In stock (MT)', cls: 'r' }, ''],
+      load: p => api.manufacturers(p),
+      row: (k, again) => h('tr', {},
+        h('td', { class: 'strong' }, k.name),
+        h('td', { class: 'r mono' }, k.products),
+        h('td', { class: 'r mono' }, k.stock_g ? f.mt(k.stock_g) : ''),
+        acts(act('Rename', async () => {
+          if (await nameForm('Rename manufacturer', k.name, '', v => api.manufacturerSave({ id: k.id, name: v }))) again();
+        }), act('×', () => removeRecord(k.name, () => api.manufacturerRemove(k.id), again), 'x')))
+    }).reload();
+  },
+
+  states(body, ctx, rerender) {
+    section(body, {
+      title: 'States', pageSize: 50,
+      hint: 'GST state codes. A party with a GSTIN takes its state from it; open one to see its parties.',
+      placeholder: 'Search state or code…',
+      head: ['Code', 'State', { label: 'Parties', cls: 'r' }],
+      load: p => api.states(p),
+      row: st => h('tr', { class: st.parties ? 'click' : '', onclick: () => {
+        if (!st.parties) return;
+        ctx.setupTab = 'parties'; ctx.setupFilter = st.code; rerender();
+      } },
+        h('td', { class: 'mono' }, st.code), h('td', {}, st.name),
+        h('td', { class: 'r mono' }, st.parties || ''))
+    }).reload();
   }
-  async function dropWh(name) {
-    if (!window.confirm(`Remove warehouse ${name}?`)) return;
-    try { await api.removeWarehouse(name); toast(`Removed ${name}`); refresh(); }
-    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
-  }
+};
 
-  // A party is a name, a phone, an address, a GSTIN and its PAN. There is no
-  // buyer/seller split - the same firm sits on either side of a deal. PAN is
-  // read off the GSTIN; it only takes typing when there is no GSTIN at all.
-  function partyRow(p) {
-    const box = (value, placeholder, width, mono) => h('input', {
-      class: 'ghost-input', value: value || '', placeholder,
-      style: { textAlign: 'left', width, fontFamily: mono ? 'var(--mono)' : 'var(--sans)' }
-    });
-    const name = box(p && p.name, 'Party name', '230px');
-    const gstin = box(p && p.gstin, 'GSTIN', '180px', true);
-    const pan = box(p && p.pan, 'PAN', '130px', true);
-    const phone = box(p && p.phone, 'Phone', '160px');
-    const address = box(p && (p.address || p.city), 'Address', '360px');
-    const syncPan = () => {
-      const g = gstin.value.replace(/\s+/g, '').toUpperCase();
-      pan.readOnly = g.length >= 12;
-      if (pan.readOnly) pan.value = g.slice(2, 12);
-      pan.title = pan.readOnly ? 'Taken from the GSTIN' : '';
-    };
-    gstin.addEventListener('input', syncPan);
-    syncPan();
-    const collect = () => ({
-      name: name.value.trim(), gstin: gstin.value.trim(), pan: pan.value.trim(),
-      phone: phone.value.trim(), address: address.value.trim()
-    });
-    return h('div', { class: 'party-row' }, name, gstin, pan, phone, address,
-      p && p.state ? h('span', { class: 'dim', style: { fontSize: '13px' } }, p.state) : null,
-      h('span', { class: 'dim', style: { marginLeft: 'auto', fontSize: '13px' } },
-        p ? (p.deal_count ? `${p.deal_count} deals` : 'unused') : ''),
-      h('button', { class: 'chip on', onclick: () => {
-        const form = collect();
-        if (!form.name) { toast('Name is required', { kind: 'err' }); return; }
-        saveParty(p, form);
-      } }, p ? 'Save' : 'Add'),
-      p ? h('button', { class: 'setup-x', onclick: () => dropParty(p) }, '×') : null);
-  }
+function grades(inner, m) {
+  const list = pagedList({
+    pageSize: 25, head: ['Grade', { label: 'Products', cls: 'r' }, { label: 'In stock (MT)', cls: 'r' }, ''],
+    load: p => api.grades({ ...p, material_id: m.id }),
+    row: g => h('tr', {},
+      h('td', { class: 'strong' }, `${m.name} ${g.name}`),
+      h('td', { class: 'r mono' }, g.products),
+      h('td', { class: 'r mono' }, g.stock_g ? f.mt(g.stock_g) : ''),
+      acts(act('Rename', async () => {
+        if (await nameForm('Rename grade', g.name, '', v => api.gradeSave({ id: g.id, material_id: m.id, name: v }))) list.reload();
+      }), act('×', () => removeRecord(`${m.name} ${g.name}`, () => api.gradeRemove(g.id), () => list.reload()), 'x')))
+  });
+  mount(inner,
+    h('div', { class: 'chips', style: { marginBottom: '10px' } },
+      h('button', { class: 'chip small on', onclick: async () => {
+        if (await nameForm(`Add grade to ${m.name}`, '', 'e.g. S65', v => api.gradeSave({ material_id: m.id, name: v }))) list.reload();
+      } }, `+ Add ${m.name} grade`)),
+    list.el);
+  list.reload({});
+}
 
-  // Hundreds of parties: render the ones that match, not all of them.
-  const plist = h('div', { class: 'party-list' });
-  const pcount = h('span', { class: 'dim' }, '');
-  const paintParties = term => {
-    const t = (term || '').trim().toLowerCase();
-    const hits = !t ? parties : parties.filter(p =>
-      [p.name, p.gstin, p.address, p.phone].some(x => (x || '').toLowerCase().includes(t)));
-    pcount.textContent = hits.length > 60
-      ? `showing 60 of ${hits.length} — search to narrow`
-      : `${hits.length} part${hits.length === 1 ? 'y' : 'ies'}`;
-    mount(plist, ...hits.slice(0, 60).map(partyRow));
-  };
-  paintParties('');
-
-  mount(view,
-    h('div', { class: 'section-head' },
-      h('h2', {}, 'Parties'), h('i', { class: 'rule' }), pcount),
-    h('div', { class: 'party-list' }, partyRow(null)),
-    h('div', { class: 'searchbar', style: { maxWidth: 'none', margin: '10px 0' } },
-      h('span', { class: 'dim' }, '⌕'),
-      h('input', {
-        placeholder: 'Search name, GSTIN, address or phone',
-        oninput: e => paintParties(e.target.value)
-      })),
-    plist,
-
-    h('div', { class: 'section-head', style: { marginTop: '34px' } },
-      h('h2', {}, 'Warehouses'), h('i', { class: 'rule' }),
-      h('span', { class: 'dim' }, 'where stock physically sits')),
-    h('div', { class: 'party-list' },
-      whRow(null),
-      ...warehouses.map(whRow)),
-
-    h('div', { class: 'section-head', style: { marginTop: '34px' } },
-      h('h2', {}, 'Materials, grades and manufacturers'), h('i', { class: 'rule' }),
-      h('span', { class: 'dim' }, 'a manufacturer is who made the resin, not who you trade with')),
-
-    searchBar('Search material, grade or manufacturer…',
-      t => { filter = t; if (t) { openMaterial = null; openGrade = null; } renderSetup(root, ctx); },
-      { value: filter }),
-
-    h('div', { class: 'setup-add' },
-      h('input', {
-        class: 'ghost-input', id: 'new-material', placeholder: 'New material, e.g. LLDPE',
-        style: { width: '280px', textAlign: 'left' },
-        onkeydown: e => { if (e.key === 'Enter') addMaterial(); }
-      }),
-      h('button', { class: 'chip on', onclick: addMaterial }, '+ Add material')),
-
-    tree.length
-      ? h('div', { class: 'setup-tree' }, ...tree.map(m => materialCard(m)))
-      : h('div', { class: 'empty' },
-          h('h3', {}, filter ? `Nothing matches "${filter}"` : 'Nothing set up yet'),
-          h('div', {}, filter ? 'Try another name.' : 'Add your first material above.')));
-
-  function addMaterial() {
-    const el = document.getElementById('new-material');
-    if (el && el.value.trim()) add({ material: el.value.trim() }, el.value.trim());
-  }
-
-  function materialCard(m) {
-    const isOpen = openMaterial === m.material || (!!term && m.grades.length > 0);
-    return h('div', { class: 'setup-node' + (isOpen ? ' open' : '') },
-      h('div', {
-        class: 'setup-row lvl-1',
-        onclick: () => { openMaterial = isOpen ? null : m.material; openGrade = null; refresh(); }
-      },
-        h('span', { class: 'twist' }, isOpen ? '▾' : '▸'),
-        h('b', {}, m.material),
-        h('span', { class: 'setup-meta' },
-          `${m.grades.length} grade${m.grades.length === 1 ? '' : 's'}`),
-        h('span', { class: 'grow' }),
-        m.stock_g ? h('span', { class: 'tag up' }, f.qty(m.stock_g)) : null,
-        h('button', {
-          class: 'setup-x',
-          onclick: e => { e.stopPropagation(); remove({ material: m.material }, m.material); }
-        }, '×')),
-
-      isOpen ? h('div', { class: 'setup-children' },
-        ...m.grades.map(g => gradeCard(m, g)),
-        h('div', { class: 'setup-inline' },
-          h('input', {
-            class: 'ghost-input', placeholder: 'New grade, e.g. HS1000',
-            style: { width: '220px', textAlign: 'left' },
-            onkeydown: e => {
-              if (e.key === 'Enter' && e.target.value.trim()) {
-                add({ material: m.material, grade: e.target.value.trim() }, e.target.value.trim());
-              }
-            }
-          }),
-          h('span', { class: 'dim' }, 'press Enter to add'))) : null);
-  }
-
-  function gradeCard(m, g) {
-    const key = m.material + '/' + g.grade;
-    const isOpen = openGrade === key || (!!term && g.manufacturers.some(k => hit(k.manufacturer)));
-    return h('div', { class: 'setup-node' + (isOpen ? ' open' : '') },
-      h('div', {
-        class: 'setup-row lvl-2',
-        onclick: () => { openGrade = isOpen ? null : key; refresh(); }
-      },
-        h('span', { class: 'twist' }, isOpen ? '▾' : '▸'),
-        h('b', {}, g.grade),
-        h('span', { class: 'setup-meta' },
-          g.manufacturers.length
-            ? g.manufacturers.map(k => k.manufacturer).join(' · ')
-            : 'no manufacturer yet'),
-        h('span', { class: 'grow' }),
-        g.stock_g ? h('span', { class: 'tag up' }, f.qty(g.stock_g)) : null,
-        h('button', {
-          class: 'setup-x',
-          onclick: e => {
-            e.stopPropagation();
-            remove({ material: m.material, grade: g.grade }, `${m.material} ${g.grade}`);
-          }
-        }, '×')),
-
-      isOpen ? h('div', { class: 'setup-children' },
-        ...g.manufacturers.map(k => h('div', { class: 'setup-row lvl-3' },
-          h('span', { class: 'twist' }, '·'),
-          h('b', {}, k.manufacturer),
-          h('span', { class: 'setup-meta' },
-            k.deals ? `${k.deals} deal${k.deals === 1 ? '' : 's'}` : 'never traded'),
-          h('span', { class: 'grow' }),
-          k.stock_g ? h('span', { class: 'tag up' }, f.qty(k.stock_g)) : null,
-          h('button', {
-            class: 'setup-x',
-            onclick: () => remove({ material: m.material, grade: g.grade, manufacturer: k.manufacturer },
-              `${k.manufacturer} for ${m.material} ${g.grade}`)
-          }, '×'))),
-        h('div', { class: 'setup-inline' },
-          h('input', {
-            class: 'ghost-input', placeholder: 'New manufacturer, e.g. Reliance',
-            style: { width: '260px', textAlign: 'left' },
-            onkeydown: e => {
-              if (e.key === 'Enter' && e.target.value.trim()) {
-                add({ material: m.material, grade: g.grade, manufacturer: e.target.value.trim() },
-                  e.target.value.trim());
-              }
-            }
-          }),
-          h('span', { class: 'dim' }, 'press Enter to add'))) : null);
-  }
-
-  return view;
+export function nameForm(title, value, placeholder, save) {
+  return openForm({
+    title, submitLabel: 'Save',
+    fields: [{ key: 'name', label: 'Name', value, placeholder, required: true, autofocus: true }],
+    submit: v => save(v.name.trim())
+  });
 }
