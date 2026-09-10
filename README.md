@@ -8,7 +8,10 @@ from and where it went.
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m backend.seed --reset     # optional demo book
 .venv/bin/python run.py                      # http://127.0.0.1:8420
-.venv/bin/python -m tests.test_engine        # 17 invariant tests
+.venv/bin/python -m tests.test_engine        # engine invariants
+.venv/bin/python -m tests.test_api           # every read endpoint
+.venv/bin/python -m tests.test_fields        # paperwork fields + migration
+.venv/bin/python -m tests.test_parties       # party identity + importer
 ```
 
 ---
@@ -252,6 +255,69 @@ own date, because a sale whose source is off-screen is not a lineage, it is a
 dangling arrow. Purchases made inside the window show too, so material bought
 and not yet sold still appears as idle stock. Beyond 60 sales it renders the
 newest and says so rather than drawing an unreadable mat.
+
+## Deal paperwork
+
+Every deal carries the fields the confirmation needs, all optional except where
+noted:
+
+| Field | Rule |
+|---|---|
+| **Sauda No.** | `LE/26-27/0001` — one series for buys and sells, restarting each 1 April (Indian financial year). The next number is one past the highest used that year, so a cancelled deal or a hand-typed number never causes a collision. Editable; must be unique. The prefix is the `sauda_prefix` setting. |
+| **Warehouse** | Belongs to the **lot**, not the stock line — the same PVC HS1000 can sit in Mundra and Aslali at once. A purchase names where it lands; a sale records wherever its lots actually sat (`Aslali, Mundra` if it drew on both). Desktop can narrow a sale to one warehouse. |
+| **Rate** | Entered and shown **per MT**, stored as paise per kg. One paisa/kg is ₹10/MT, so per-MT entry is exact in ₹10 steps; a finer figure is refused and Book locks — it is never silently rounded. |
+| **GST extra** | Checkbox, on by default ("98.25+"). Recorded only; margin maths is on basic rates. |
+| **Payment due** | A calendar date, with Today / +7 / +15 / +30 / +45 day shortcuts counted from the deal date. |
+| **Ex-Place** | Free text — pricing basis, e.g. Mundra. |
+
+Warehouses (name + location) are kept in **Setup**. Renaming one rewrites every
+lot and deal that records it, in one transaction.
+
+## Parties
+
+A party is **name, phone, address, GSTIN, PAN** — no buyer/seller split, because
+the same firm sits on either side of a deal from one week to the next.
+
+* **Unique by GSTIN.** A second party cannot take a GSTIN that is in use.
+* **PAN comes from the GSTIN** (characters 3–12) and cannot disagree with it. It
+  only takes typing for a party with no GSTIN.
+* **GSTINs are check-digit validated** when typed, so a one-key typo is refused
+  instead of becoming a second, nearly identical party.
+* **Branches of one firm are separate parties** — two GSTINs sharing a PAN, one
+  per state. They may share a name; the second is told apart internally by its
+  GSTIN.
+
+### Importing parties from Tally
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt          # openpyxl, import only
+.venv/bin/python -m backend.import_parties --dry-run "labdhi exim ledger address.xlsx" "om ledger address.xlsx"
+.venv/bin/python -m backend.import_parties           "labdhi exim ledger address.xlsx" "om ledger address.xlsx"
+```
+
+Reads Tally's *Updation of Party GSTIN/UIN* export. Numbered rows are parties;
+the un-numbered `DELIVERY` rows beneath them are ship-to addresses and are
+skipped; rows whose State is *Not Applicable* are accounting ledgers and are
+excluded. Duplicates collapse on GSTIN across both files, keeping the fuller
+address and never a `- OLD` name. The dry run lists anything needing a human:
+GSTINs failing their check digit, and **different-looking firms sharing one
+GSTIN** — which cannot be legitimate, so one of them is keyed wrongly in Tally.
+
+Re-running is safe: nothing is created twice, and an import never blanks a
+field already filled in (the sheets carry no phone numbers).
+
+> **The ledgers are private.** They hold real customer names, addresses and
+> GSTINs, and this repository is public. `*.xlsx` is gitignored — never commit
+> them.
+
+## Schema changes on a live database
+
+`CREATE TABLE IF NOT EXISTS` never alters a table that already exists, so
+columns added after the first deploy live in `db.MIGRATIONS` and are added in
+place on boot, once. `tests/test_fields.py` builds a database from the old
+schema and proves it upgrades without losing a row. Indexes on new columns are
+created in `db.migrate()`, never in `schema.sql`, which runs first and would
+abort on a column that does not exist yet.
 
 ## Known edges
 

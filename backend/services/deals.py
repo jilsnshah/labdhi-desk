@@ -19,12 +19,36 @@ class DealError(Exception):
 
 
 # ------------------------------------------------------------------ refs
-def _next_ref(conn, side: str) -> str:
-    prefix = "B" if side == "buy" else "S"
-    n = db.scalar("SELECT COUNT(*) FROM deals WHERE side=?", (side,)) + 1
-    while db.q1("SELECT 1 FROM deals WHERE ref=?", ("%s-%04d" % (prefix, n),)):
+def financial_year(deal_date: Optional[str] = None) -> str:
+    """Indian financial year, April to March: 10 Sep 2026 -> "26-27"."""
+    d = deal_date or db.today()
+    year, month = int(d[:4]), int(d[5:7])
+    start = year if month >= 4 else year - 1
+    return "%02d-%02d" % (start % 100, (start + 1) % 100)
+
+
+def next_sauda_no(deal_date: Optional[str] = None) -> str:
+    """LE/26-27/0001. One series for buys and sells, restarting each April.
+
+    The next number is one past the highest already used in that year rather
+    than a count of deals, so a cancelled deal or a hand-typed number can never
+    cause the next auto-number to collide with an existing one.
+    """
+    prefix = (db.settings().get("sauda_prefix") or "LE").strip()
+    stem = "%s/%s/" % (prefix, financial_year(deal_date))
+    highest = 0
+    for r in db.q("SELECT ref FROM deals WHERE ref LIKE ?", (stem + "%",)):
+        tail = r["ref"][len(stem):]
+        if tail.isdigit():
+            highest = max(highest, int(tail))
+    n = highest + 1
+    while db.q1("SELECT 1 FROM deals WHERE ref=?", (stem + "%04d" % n,)):
         n += 1
-    return "%s-%04d" % (prefix, n)
+    return stem + "%04d" % n
+
+
+def _next_ref(conn, side: str, deal_date: Optional[str] = None) -> str:
+    return next_sauda_no(deal_date)
 
 
 TERM_FIELDS = ("freight_by", "delivery_by", "payment_terms", "eway", "remarks")
@@ -77,18 +101,33 @@ def create_deal(payload: Dict[str, Any]) -> Dict[str, Any]:
         if payload.get("transporter"):
             transporter_id = catalog.upsert_party(conn, payload["transporter"], "transporter")
 
-        ref = _next_ref(conn, side)
+        deal_date = payload.get("deal_date") or db.today()
+        # A Sauda No. typed by the trader is kept as typed; it only has to be
+        # unique. Otherwise the next number in this financial year is issued.
+        ref = (payload.get("sauda_no") or "").strip()
+        if ref:
+            if db.q1("SELECT 1 FROM deals WHERE ref=?", (ref,)):
+                raise DealError("Sauda No. %s is already used" % ref)
+        else:
+            ref = _next_ref(conn, side, deal_date)
+
+        warehouse = (payload.get("warehouse") or "").strip() or None
+        if warehouse:
+            catalog.add_warehouse(conn, warehouse)
+
         deal_id = conn.insert(
             """INSERT INTO deals
                (ref,side,status,party_id,sku_id,qty_g,rate_paise,plus_gst,deal_date,
                 transporter_id,freight_by,delivery_by,payment_terms,eway,remarks,
-                alloc_policy,uncovered_g,created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)""",
+                warehouse,payment_due,ex_place,alloc_policy,uncovered_g,created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)""",
             (ref, side, "draft", party_id, sku_id, qty_g, rate_paise,
              1 if payload.get("plus_gst", True) else 0,
-             payload.get("deal_date") or db.today(), transporter_id,
+             deal_date, transporter_id,
              payload.get("freight_by"), payload.get("delivery_by"),
              payload.get("payment_terms"), payload.get("eway"), payload.get("remarks"),
+             warehouse, (payload.get("payment_due") or "").strip() or None,
+             (payload.get("ex_place") or "").strip() or None,
              payload.get("policy") or db.settings().get("alloc_policy", "fifo"), db.now()),
         )
         db.log(conn, "deal", deal_id, "create", "Drafted %s" % ref, {"side": side, "ref": ref})
@@ -138,10 +177,10 @@ def _book_buy(conn, deal) -> None:
     label = "%s / %s" % (deal["ref"], _party_name(deal["party_id"]))
     lot_id = conn.insert(
         """INSERT INTO lots(label,deal_id,sku_id,supplier_id,rate_paise,qty_g,
-                            qty_allocated_g,status,booked_at)
-           VALUES (?,?,?,?,?,?,0,'open',?)""",
+                            qty_allocated_g,status,warehouse,booked_at)
+           VALUES (?,?,?,?,?,?,0,'open',?,?)""",
         (label, deal["id"], deal["sku_id"], deal["party_id"],
-         deal["rate_paise"], deal["qty_g"], db.now()),
+         deal["rate_paise"], deal["qty_g"], deal["warehouse"], db.now()),
     )
     db.log(conn, "deal", deal["id"], "book",
            "Bought %s %s @ %s" % (fmt_qty(deal["qty_g"]), _sku_name(deal["sku_id"]),
@@ -160,6 +199,7 @@ def _book_sell(conn, deal, pins=None, policy=None, allow_short: bool = False) ->
         )
 
     _write_allocations(conn, deal, plan, policy)
+    _stamp_sale_warehouse(conn, deal)
     margin = _margin_of(deal["id"])
     db.log(conn, "deal", deal["id"], "book",
            "Sold %s %s @ %s  (margin %s)"
@@ -183,6 +223,20 @@ def _write_allocations(conn, deal, plan, policy) -> None:
     conn.execute("UPDATE deals SET uncovered_g=?, alloc_policy=? WHERE id=?",
                  (plan["uncovered_g"], policy, deal["id"]))
     _refresh_lot_status(conn)
+
+
+def _stamp_sale_warehouse(conn, deal) -> None:
+    """A sale leaves from wherever its lots sit. Unless the trader named a
+    warehouse himself, record the one(s) the chosen lots actually came from."""
+    if deal["warehouse"]:
+        return
+    rows = db.q(
+        """SELECT DISTINCT l.warehouse FROM allocations a JOIN lots l ON l.id = a.lot_id
+           WHERE a.sale_deal_id = ? AND a.active = 1 AND l.warehouse IS NOT NULL
+           ORDER BY l.warehouse""", (deal["id"],))
+    names = [r["warehouse"] for r in rows]
+    if names:
+        conn.execute("UPDATE deals SET warehouse=? WHERE id=?", (", ".join(names), deal["id"]))
 
 
 def _release_allocations(conn, sale_deal_id: int) -> None:

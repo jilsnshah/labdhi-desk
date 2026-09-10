@@ -50,14 +50,142 @@ def upsert_party(conn, name: str, role: Optional[str] = None, **fields) -> int:
     return pid
 
 
+# ------------------------------------------------------------------ GSTIN
+# A GSTIN is two digits of state, the holder's ten-character PAN, an entity
+# number, a literal Z and a check character. The check character is computed
+# over the first fourteen, so most single-key typos are caught before they
+# become a second party with a nearly identical number.
+GSTIN_RE = re.compile(r"^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
+PAN_RE = re.compile(r"^[A-Z]{5}\d{4}[A-Z]$")
+_B36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+STATES = {
+    "01": "Jammu & Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh",
+    "05": "Uttarakhand", "06": "Haryana", "07": "Delhi", "08": "Rajasthan", "09": "Uttar Pradesh",
+    "10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh", "13": "Nagaland", "14": "Manipur",
+    "15": "Mizoram", "16": "Tripura", "17": "Meghalaya", "18": "Assam", "19": "West Bengal",
+    "20": "Jharkhand", "21": "Odisha", "22": "Chhattisgarh", "23": "Madhya Pradesh",
+    "24": "Gujarat", "26": "Dadra & Nagar Haveli and Daman & Diu", "27": "Maharashtra",
+    "29": "Karnataka", "30": "Goa", "31": "Lakshadweep", "32": "Kerala", "33": "Tamil Nadu",
+    "34": "Puducherry", "35": "Andaman & Nicobar", "36": "Telangana", "37": "Andhra Pradesh",
+    "38": "Ladakh", "97": "Other Territory",
+}
+
+
+def normalize_gstin(value) -> str:
+    return re.sub(r"\s+", "", str(value or "")).upper()
+
+
+def _gstin_checksum_ok(g: str) -> bool:
+    total = 0
+    for i, ch in enumerate(g[:14]):
+        v = _B36.index(ch) * (2 if i % 2 else 1)
+        total += v // 36 + v % 36
+    return _B36[(36 - total % 36) % 36] == g[14]
+
+
+def gstin_problem(g: str) -> Optional[str]:
+    """None if the GSTIN is sound, otherwise what is wrong with it."""
+    if not g:
+        return None
+    if not GSTIN_RE.match(g):
+        return "not in GSTIN format"
+    if not _gstin_checksum_ok(g):
+        return "check character does not match - likely a typo"
+    return None
+
+
+def pan_from_gstin(g: str) -> str:
+    return g[2:12] if g and GSTIN_RE.match(g) else ""
+
+
+def state_of(g: str) -> str:
+    return STATES.get((g or "")[:2], "") if g else ""
+
+
+# ------------------------------------------------------------------ warehouses
+def list_warehouses() -> List[Dict[str, Any]]:
+    """Every stock location, with what is sitting in it right now."""
+    rows = db.q(
+        """SELECT w.name, w.location,
+                  COALESCE((SELECT SUM(l.qty_g - l.qty_allocated_g) FROM lots l
+                            WHERE l.warehouse = w.name AND l.status = 'open'), 0) AS stock_g,
+                  (SELECT COUNT(*) FROM lots l WHERE l.warehouse = w.name
+                   AND l.status != 'cancelled') AS lots
+           FROM warehouses w ORDER BY stock_g DESC, w.name""")
+    return [dict(r) for r in rows]
+
+
+def add_warehouse(conn, name: str, location: Optional[str] = None) -> str:
+    name = clean(name)
+    if not name:
+        raise ValueError("Warehouse name is required")
+    exists = db.q1("SELECT 1 FROM warehouses WHERE name=?", (name,))
+    if not exists:
+        conn.execute("INSERT OR IGNORE INTO warehouses(name,location,created_at) VALUES (?,?,?)",
+                     (name, clean(location) or None, db.now()))
+        db.log(conn, "warehouse", None, "create", "Added warehouse %s" % name, {"name": name})
+    return name
+
+
+def save_warehouse(conn, name: str, location: Optional[str] = None,
+                   old_name: Optional[str] = None) -> str:
+    """Add a warehouse, or edit one - including renaming it.
+
+    Lots and deals record the warehouse by name, so a rename is carried through
+    every row that mentions it inside the same transaction. A sale drawn from two
+    warehouses records both ("Aslali, Mundra"), so those are rewritten name by
+    name rather than by a blind string replace that could hit a longer name.
+    """
+    name = clean(name)
+    if not name:
+        raise ValueError("Warehouse name is required")
+    old_name = clean(old_name) if old_name else None
+
+    if not old_name or old_name == name:
+        if not db.q1("SELECT 1 FROM warehouses WHERE name=?", (name,)):
+            return add_warehouse(conn, name, location)
+        if location is not None:
+            conn.execute("UPDATE warehouses SET location=? WHERE name=?", (clean(location) or None, name))
+            db.log(conn, "warehouse", None, "update", "Updated %s" % name, {"location": location})
+        return name
+
+    if not db.q1("SELECT 1 FROM warehouses WHERE name=?", (old_name,)):
+        raise ValueError("No warehouse called %s" % old_name)
+    if db.q1("SELECT 1 FROM warehouses WHERE name=?", (name,)):
+        raise ValueError("A warehouse called %s already exists" % name)
+
+    conn.execute("UPDATE warehouses SET name=?, location=COALESCE(?, location) WHERE name=?",
+                 (name, (clean(location) or None) if location is not None else None, old_name))
+    conn.execute("UPDATE lots SET warehouse=? WHERE warehouse=?", (name, old_name))
+    for r in db.q("SELECT id, warehouse FROM deals WHERE warehouse LIKE ?", ("%" + old_name + "%",)):
+        parts = [name if p.strip() == old_name else p.strip() for p in r["warehouse"].split(",")]
+        joined = ", ".join(parts)
+        if joined != r["warehouse"]:
+            conn.execute("UPDATE deals SET warehouse=? WHERE id=?", (joined, r["id"]))
+    db.log(conn, "warehouse", None, "rename", "Renamed %s to %s" % (old_name, name),
+           {"from": old_name, "to": name})
+    return name
+
+
+def remove_warehouse(conn, name: str) -> None:
+    n = db.scalar("SELECT COUNT(*) FROM lots WHERE warehouse=? AND status != 'cancelled'", (name,))
+    if n:
+        raise ValueError("Cannot remove - %d lot%s are recorded in %s"
+                         % (n, "" if n == 1 else "s", name))
+    conn.execute("DELETE FROM warehouses WHERE name=?", (name,))
+    db.log(conn, "warehouse", None, "remove", "Removed warehouse %s" % name, {"name": name})
+
+
 def list_parties(term: str = "") -> List[Dict[str, Any]]:
-    """Everyone you trade with, for the Setup screen."""
+    """Every counterparty, for the Setup screen. There is no buyer/seller split:
+    the same firm is on either side of a deal from one week to the next."""
     where, args = [], []
     if term:
-        where.append("(LOWER(p.name) LIKE ? OR LOWER(COALESCE(p.city,'')) LIKE ? "
-                     "OR COALESCE(p.phone,'') LIKE ?)")
         t = "%%%s%%" % term.strip().lower()
-        args += [t, t, "%%%s%%" % term.strip()]
+        where.append("(LOWER(p.name) LIKE ? OR LOWER(COALESCE(p.address,'')) LIKE ? "
+                     "OR LOWER(COALESCE(p.gstin,'')) LIKE ? OR COALESCE(p.phone,'') LIKE ?)")
+        args += [t, t, t, "%%%s%%" % term.strip()]
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     rows = db.q(
         """SELECT * FROM (
@@ -70,44 +198,101 @@ def list_parties(term: str = "") -> List[Dict[str, Any]]:
            ) ranked
            ORDER BY (last_deal IS NULL), last_deal DESC, deal_count DESC, name""".format(clause=clause),
         args)
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["state"] = state_of(d.get("gstin"))
+        out.append(d)
+    return out
 
 
 def save_party(conn, name: str, phone: str = "", city: str = "",
                is_supplier: bool = False, is_customer: bool = False,
-               party_id: Optional[int] = None) -> int:
-    """Create or edit a counterparty. Name, phone and location, nothing more -
-    everything else about them is already implied by their deals."""
+               party_id: Optional[int] = None, address: str = "",
+               gstin: str = "", pan: str = "", strict: bool = True,
+               merge: bool = False, quiet: bool = False) -> int:
+    """Create or edit a counterparty: name, phone, address, GSTIN, PAN.
+
+    Identity is the GSTIN when there is one; otherwise the name. PAN is taken
+    from the GSTIN and cannot disagree with it.
+
+    `merge` is for imports: a blank incoming field leaves the existing value
+    alone, so loading a sheet with no phone numbers never erases the ones
+    already typed in. `strict` rejects a GSTIN whose check character fails; the
+    importer turns it off and reports those instead of silently dropping them.
+    """
     name = clean(name)
     if not name:
         raise ValueError("Name is required")
     phone, city = clean(phone), clean(city)
-    slug = db.slugify(name)
+    address = (address or "").strip()
+    gstin = normalize_gstin(gstin)
+    if gstin and strict:
+        problem = gstin_problem(gstin)
+        if problem:
+            raise ValueError("GSTIN %s is %s" % (gstin, problem))
+    pan = pan_from_gstin(gstin) or normalize_gstin(pan)
+    if pan and strict and not PAN_RE.match(pan):
+        raise ValueError("PAN %s is not in PAN format" % pan)
 
-    existing = db.q1("SELECT id FROM parties WHERE slug=?", (slug,))
-    if existing and (party_id is None or int(existing["id"]) != int(party_id)):
-        if party_id is None:
-            party_id = int(existing["id"])       # same name: edit them instead
+    # ---- who is this?
+    adopted = False
+    if party_id is None and gstin:
+        row = db.q1("SELECT id FROM parties WHERE gstin=?", (gstin,))
+        if row:
+            party_id, adopted = int(row["id"]), True
+    base = db.slugify(name)
+    holder = db.q1("SELECT id, gstin FROM parties WHERE slug=?", (base,))
+    if party_id is None and holder is not None:
+        # Same name already on the books. It is the same party unless both
+        # carry GSTINs and they differ - then it is another branch of the firm.
+        if not gstin or not holder["gstin"] or holder["gstin"] == gstin:
+            party_id, adopted = int(holder["id"]), True
+
+    # ---- the name slug stays unique; a second branch is told apart by GSTIN
+    slug = base
+    if holder is not None and (party_id is None or int(holder["id"]) != int(party_id)):
+        if gstin:
+            slug = "%s-%s" % (base, gstin.lower())
         else:
             raise ValueError("Another party is already called %s" % name)
 
     if party_id:
+        cur = db.q1("SELECT * FROM parties WHERE id=?", (int(party_id),))
+        if cur is None:
+            raise ValueError("No such party")
+        keep = merge or adopted
+        pick = lambda new, old: new if (new or not keep) else old          # noqa: E731
+        final_gstin = pick(gstin, cur["gstin"]) or None
+        final_pan = pan_from_gstin(final_gstin or "") or pick(pan, cur["pan"]) or None
+        if final_gstin:
+            clash = db.q1("SELECT name FROM parties WHERE gstin=? AND id != ?",
+                          (final_gstin, int(party_id)))
+            if clash:
+                raise ValueError("GSTIN %s already belongs to %s" % (final_gstin, clash["name"]))
+        # keep the stored slug unless the name itself changed
+        if cur["name"] == name:
+            slug = cur["slug"]
         conn.execute(
-            "UPDATE parties SET name=?, slug=?, phone=?, city=?, is_supplier=?, is_customer=? "
-            "WHERE id=?",
-            (name, slug, phone or None, city or None,
-             1 if is_supplier else 0, 1 if is_customer else 0, int(party_id)))
-        db.log(conn, "party", int(party_id), "update", "Updated %s" % name,
-               {"name": name, "phone": phone, "city": city})
+            "UPDATE parties SET name=?, slug=?, phone=?, city=?, address=?, gstin=?, pan=? WHERE id=?",
+            (name, slug, pick(phone, cur["phone"]) or None, pick(city, cur["city"]) or None,
+             pick(address, cur["address"]) or None, final_gstin, final_pan, int(party_id)))
+        if not quiet:
+            db.log(conn, "party", int(party_id), "update", "Updated %s" % name,
+                   {"name": name, "gstin": final_gstin})
         return int(party_id)
 
+    if gstin:
+        clash = db.q1("SELECT name FROM parties WHERE gstin=?", (gstin,))
+        if clash:
+            raise ValueError("GSTIN %s already belongs to %s" % (gstin, clash["name"]))
     new_id = conn.insert(
-        "INSERT INTO parties(name,slug,is_supplier,is_customer,is_transporter,city,phone,notes,created_at)"
-        " VALUES (?,?,?,?,0,?,?,NULL,?)",
+        "INSERT INTO parties(name,slug,is_supplier,is_customer,is_transporter,city,phone,address,"
+        "gstin,pan,notes,created_at) VALUES (?,?,?,?,0,?,?,?,?,?,NULL,?)",
         (name, slug, 1 if is_supplier else 0, 1 if is_customer else 0,
-         city or None, phone or None, db.now()))
-    db.log(conn, "party", new_id, "create", "Added %s" % name,
-           {"name": name, "phone": phone, "city": city})
+         city or None, phone or None, address or None, gstin or None, pan or None, db.now()))
+    if not quiet:
+        db.log(conn, "party", new_id, "create", "Added %s" % name, {"name": name, "gstin": gstin})
     return new_id
 
 
@@ -125,11 +310,15 @@ def remove_party(conn, party_id: int) -> None:
 def search_parties(term: str = "", role: Optional[str] = None, limit: int = 8) -> List[Dict[str, Any]]:
     """Ranked chips: recent + frequent first, then name match."""
     where, args = [], []
-    if role in ("supplier", "customer", "transporter"):
-        where.append("(p.is_%s = 1 OR p.id IN (SELECT party_id FROM deals))" % role)
+    # No buyer/seller split: anyone can be on either side. The only thing kept
+    # out of the picker is a transporter who has never been a trading party.
+    if role in ("supplier", "customer"):
+        where.append("NOT (p.is_transporter = 1 AND p.id NOT IN (SELECT party_id FROM deals))")
+    elif role == "transporter":
+        where.append("p.is_transporter = 1")
     if term:
-        where.append("(p.slug LIKE ? OR p.name LIKE ?)")
-        args += ["%%%s%%" % db.slugify(term), "%%%s%%" % term]
+        where.append("(p.slug LIKE ? OR p.name LIKE ? OR UPPER(COALESCE(p.gstin,'')) LIKE ?)")
+        args += ["%%%s%%" % db.slugify(term), "%%%s%%" % term, "%%%s%%" % term.strip().upper()]
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     side = "buy" if role == "supplier" else ("sell" if role == "customer" else None)
     side_filter = "AND d.side='%s'" % side if side else ""

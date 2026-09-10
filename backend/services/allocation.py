@@ -28,7 +28,12 @@ DEFAULT_POLICY = "fifo"
 
 
 # ------------------------------------------------------------------ reading
-def available_lots(sku_id: int, include_empty: bool = False) -> List[Dict[str, Any]]:
+def available_lots(sku_id: int, include_empty: bool = False,
+                   warehouse: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Open lots of one stock line, optionally only those sitting in one warehouse."""
+    where, args = ["l.sku_id = ?", "l.status = 'open'"], [sku_id]
+    if warehouse:
+        where.append("l.warehouse = ?"); args.append(warehouse)
     rows = db.q(
         """
         SELECT l.*, p.name AS supplier_name, d.ref AS deal_ref, d.deal_date,
@@ -36,10 +41,10 @@ def available_lots(sku_id: int, include_empty: bool = False) -> List[Dict[str, A
         FROM lots l
         JOIN parties p ON p.id = l.supplier_id
         JOIN deals   d ON d.id = l.deal_id
-        WHERE l.sku_id = ? AND l.status = 'open'
+        WHERE """ + " AND ".join(where) + """
         ORDER BY d.deal_date, l.id
         """,
-        (sku_id,),
+        args,
     )
     lots = [dict(r) for r in rows]
     if not include_empty:

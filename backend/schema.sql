@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS parties (
   is_transporter INTEGER NOT NULL DEFAULT 0,
   city           TEXT,
   phone          TEXT,
+  address        TEXT,
+  gstin          TEXT,          -- unique when present; see db.migrate for the index
+  pan            TEXT,          -- derived from GSTIN when there is one
   notes          TEXT,
   created_at     TEXT NOT NULL
 );
@@ -88,6 +91,9 @@ CREATE TABLE IF NOT EXISTS deals (
   payment_terms  TEXT,
   eway           TEXT,
   remarks        TEXT,
+  warehouse      TEXT,          -- buy: where it lands; sell: where it leaves from
+  payment_due    TEXT,          -- ISO date the money is due
+  ex_place       TEXT,          -- pricing basis, e.g. Ex-Mundra (record only)
   -- sell-side bookkeeping
   alloc_policy   TEXT,
   uncovered_g    INTEGER NOT NULL DEFAULT 0,
@@ -111,10 +117,21 @@ CREATE TABLE IF NOT EXISTS lots (
   qty_g           INTEGER NOT NULL CHECK (qty_g > 0),
   qty_allocated_g INTEGER NOT NULL DEFAULT 0 CHECK (qty_allocated_g >= 0),
   status          TEXT NOT NULL CHECK (status IN ('open','exhausted','cancelled')),
+  warehouse       TEXT,         -- where this lot physically sits
   booked_at       TEXT NOT NULL,
   CHECK (qty_allocated_g <= qty_g)
 );
 CREATE INDEX IF NOT EXISTS ix_lots_sku ON lots(sku_id, status);
+
+-- ---------------------------------------------------------------- warehouses
+-- Stock locations, maintained from Setup. A location belongs to a LOT, not to
+-- a stock line: the same PVC HS1000 can sit in Mundra and in Aslali at once,
+-- and a sale picks warehouses by picking lots.
+CREATE TABLE IF NOT EXISTS warehouses (
+  name       TEXT PRIMARY KEY,
+  location   TEXT,
+  created_at TEXT NOT NULL
+);
 
 -- ---------------------------------------------------------------- allocations
 -- The edge of the lineage graph: lot --qty--> sale deal.

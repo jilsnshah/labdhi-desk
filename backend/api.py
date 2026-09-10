@@ -91,6 +91,10 @@ class DealIn(BaseModel):
     payment_terms: Optional[str] = None
     eway: Optional[str] = None
     remarks: Optional[str] = None
+    sauda_no: Optional[str] = None        # LE/26-27/0001; blank means "issue the next one"
+    warehouse: Optional[str] = None       # stock location
+    payment_due: Optional[str] = None     # ISO date
+    ex_place: Optional[str] = None        # pricing basis, e.g. Ex-Mundra
     policy: Optional[str] = None
     pins: Optional[List[Dict[str, int]]] = None
     allow_short: bool = False
@@ -255,6 +259,9 @@ class PartyIn(BaseModel):
     id: Optional[int] = None
     name: str
     phone: Optional[str] = ""
+    address: Optional[str] = ""
+    gstin: Optional[str] = ""
+    pan: Optional[str] = ""                # ignored when a GSTIN is given
     city: Optional[str] = ""
     is_supplier: bool = False
     is_customer: bool = False
@@ -270,7 +277,8 @@ def save_party(body: PartyIn):
     with db.tx() as conn:
         pid = catalog.save_party(
             conn, name=body.name, phone=body.phone or "", city=body.city or "",
-            is_supplier=body.is_supplier, is_customer=body.is_customer, party_id=body.id)
+            is_supplier=body.is_supplier, is_customer=body.is_customer, party_id=body.id,
+            address=body.address or "", gstin=body.gstin or "", pan=body.pan or "")
     return {"id": pid, "parties": catalog.list_parties()}
 
 
@@ -326,8 +334,39 @@ def catalog_resolve(material: str, grade: str, manufacturer: str = ""):
 
 
 @app.get("/api/lots/{sku_id}")
-def lots(sku_id: int):
-    return {"lots": allocation.available_lots(sku_id)}
+def lots(sku_id: int, warehouse: Optional[str] = None):
+    return {"lots": allocation.available_lots(sku_id, warehouse=warehouse)}
+
+
+@app.get("/api/sauda/next")
+def sauda_next(date: Optional[str] = None):
+    """The number the next deal on this date would get - for the regenerate button."""
+    return {"sauda_no": deals.next_sauda_no(date)}
+
+
+class WarehouseIn(BaseModel):
+    name: str
+    location: Optional[str] = None
+    old_name: Optional[str] = None       # set when renaming
+
+
+@app.get("/api/warehouses")
+def warehouses():
+    return {"warehouses": catalog.list_warehouses()}
+
+
+@app.post("/api/warehouses")
+def save_warehouse(body: WarehouseIn):
+    with db.tx() as conn:
+        catalog.save_warehouse(conn, body.name, body.location, body.old_name)
+    return {"warehouses": catalog.list_warehouses()}
+
+
+@app.post("/api/warehouses/remove")
+def remove_warehouse(body: WarehouseIn):
+    with db.tx() as conn:
+        catalog.remove_warehouse(conn, body.name)
+    return {"warehouses": catalog.list_warehouses()}
 
 
 @app.get("/api/deals")

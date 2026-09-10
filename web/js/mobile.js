@@ -125,6 +125,9 @@ export function startTicket(side, prefill = {}) {
     lastRate: prefill.rate_paise || 0,
     options: [], query: '', browse: null, editingLot: null,
     terms: { transporter: '', freight_by: '', delivery_by: '', payment_terms: '', eway: '', remarks: '' },
+    sauda_no: '', saudaAuto: true,
+    warehouse: lastWarehouse(), warehouses: [],
+    plus_gst: true, payment_due: '', ex_place: '',
     date: todayISO(), busy: false, error: ''
   };
   document.body.classList.add('trading');
@@ -134,7 +137,32 @@ export function startTicket(side, prefill = {}) {
   window.addEventListener('popstate', onPop);
   if (ms.sku && ms.sku.id) loadSku(ms.sku.id);
   loadStep();
+  refreshSauda(true);
+  loadWarehouses();
   paint();
+}
+
+// The last warehouse used on this device is the likeliest next one.
+function lastWarehouse() { try { return localStorage.getItem('labdhi.lastWarehouse') || ''; } catch (_) { return ''; } }
+function rememberWarehouse(n) { try { localStorage.setItem('labdhi.lastWarehouse', n); } catch (_) { /* private mode */ } }
+
+async function refreshSauda(force) {
+  if (!ms) return;
+  const r = await api.saudaNext(ms.date).catch(() => null);
+  if (!ms || !r) return;
+  if (force || ms.saudaAuto) { ms.sauda_no = r.sauda_no; ms.saudaAuto = true; paint(); }
+}
+
+async function loadWarehouses() {
+  const r = await api.warehouses().catch(() => ({ warehouses: [] }));
+  if (ms) { ms.warehouses = r.warehouses; }
+}
+
+function addDays(iso, days) {
+  const d = new Date((iso || todayISO()) + 'T00:00:00');
+  d.setDate(d.getDate() + days);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 function onPop() {
@@ -334,7 +362,10 @@ function stepWho() {
     },
       h('div', { class: 'mopt-main' },
         h('b', {}, p.name),
-        p.last_deal ? h('span', {}, `${p.deal_count} deals · ${f.ago(p.last_deal)}`) : null))),
+        (p.last_deal || p.gstin)
+          ? h('span', {}, [p.last_deal ? `${p.deal_count} deals · ${f.ago(p.last_deal)}` : null,
+                           p.gstin].filter(Boolean).join(' · '))
+          : null))),
     typed && !exact
       ? h('button', {
           class: 'mopt ghost',
@@ -471,42 +502,55 @@ function autoIfSingle() {
 }
 
 // --------------------------------------------------------------- rate
+// Rates are typed per MT, the way they are quoted. A per-MT figure is exact only
+// in Rs 10 steps; anything finer is refused and Next stays locked, rather than
+// quietly storing a number the trader never typed.
 function stepRate() {
-  const live = ms.entry !== '' ? Math.round(parseFloat(ms.entry || '0') * 100) : ms.rate_paise;
+  const typed = ms.entry !== '';
+  const live = typed ? f.fromPerMt(Number(ms.entry)) : ms.rate_paise;
+  const bad = typed && live === null;
+  const paise = live || 0;
   const cost = ms.side === 'sell' ? sellCost() : 0;
-  const marginRate = cost ? live - cost : 0;
+  const marginRate = cost && paise ? paise - cost : 0;
   const margin = valuePaise(ms.qty_g, marginRate);
   const good = marginRate >= 0;
+  const shown = typed ? Number(ms.entry || 0).toLocaleString('en-IN')
+                      : f.perMt(ms.rate_paise).toLocaleString('en-IN');
 
   return [
     h('div', { class: 'mt-q' }, ms.side === 'sell' ? 'At what rate?' : 'At what cost?'),
     h('div', { class: 'mt-hint' }, `${f.qty(ms.qty_g)} · ${ms.sku.display}`),
 
     ms.side === 'sell' && cost
-      ? h('div', { class: 'mlive ' + (live ? (good ? 'good' : 'bad') : '') },
+      ? h('div', { class: 'mlive ' + (paise ? (good ? 'good' : 'bad') : '') },
           h('div', { class: 'mlive-top' },
             h('b', { class: 'num ' + (good ? 'up' : 'down') }, f.inr(margin, { sign: true })),
-            h('span', { class: 'num ' + (good ? 'up' : 'down') }, f.rateDelta(marginRate) + '/kg')),
+            h('span', { class: 'num ' + (good ? 'up' : 'down') }, f.rateDelta(marginRate) + '/MT')),
           h('div', { class: 'mlive-sub' },
-            `your cost ${f.rate(cost)} · sale value ${f.inr(valuePaise(ms.qty_g, live))}`))
-      : (live ? h('div', { class: 'mlive' },
-          h('div', { class: 'mlive-top' }, h('b', { class: 'num' }, f.inr(valuePaise(ms.qty_g, live)))),
+            `your cost ${f.rate(cost)}/MT · sale value ${f.inr(valuePaise(ms.qty_g, paise))}`))
+      : (paise ? h('div', { class: 'mlive' },
+          h('div', { class: 'mlive-top' }, h('b', { class: 'num' }, f.inr(valuePaise(ms.qty_g, paise)))),
           h('div', { class: 'mlive-sub' }, 'total value of this purchase')) : null),
 
-    h('div', { class: 'mnum-value' },
-      h('b', {}, '₹' + (ms.entry !== '' ? ms.entry : (live / 100).toFixed(2))),
-      h('small', {}, 'per kg, basic rate')),
+    h('div', { class: 'mnum-value' + (bad ? ' warn' : '') },
+      h('b', {}, '₹' + shown),
+      h('small', {}, bad ? 'Rates go in steps of ₹10 per MT' : 'per MT, basic rate')),
 
     h('div', { class: 'mchips g3' },
-      ...[-100, -50, -25, 25, 50, 100].map(d => h('button', {
+      ...[-50, -25, -10, 10, 25, 50].map(d => h('button', {
         class: 'mchip',
         onclick: () => {
-          const base = ms.entry !== '' ? Math.round(parseFloat(ms.entry) * 100) : ms.rate_paise;
+          const base = typed && live !== null ? live : ms.rate_paise;
           ms.rate_paise = Math.max(0, base + d); ms.entry = ''; paint();
         }
-      }, (d > 0 ? '+' : '−') + '₹' + Math.abs(d / 100).toFixed(2)))),
+      }, (d > 0 ? '+' : '−') + '₹' + Math.abs(d * f.PER_MT).toLocaleString('en-IN')))),
 
-    numpad(2, () => { ms.rate_paise = Math.round(parseFloat(ms.entry || '0') * 100); })
+    h('button', {
+      class: 'mgst' + (ms.plus_gst ? ' on' : ''),
+      onclick: () => { ms.plus_gst = !ms.plus_gst; paint(); }
+    }, ms.plus_gst ? '✓ GST extra — rate excludes GST' : 'GST included in this rate'),
+
+    numpad(2, null, null, { noDot: true })
   ];
 }
 
@@ -541,11 +585,11 @@ function stepSplit() {
       h('div', { class: 'mlot-rate num' }, f.rate(row.lot.rate_paise)),
       h('div', { class: 'mlot-main' },
         h('b', {}, row.lot.supplier_name),
-        h('span', {}, `${f.qty(row.lot.available_g)} free · ${f.date(row.lot.deal_date)}`)),
+        h('span', {}, `${f.qty(row.lot.available_g)} free · ${row.lot.warehouse || 'no warehouse'} · ${f.date(row.lot.deal_date)}`)),
       h('div', { class: 'mlot-take' },
         h('b', { class: 'num ' + (row.take ? '' : 'dim') }, row.take ? f.qty(row.take) : '—'),
         h('span', { class: row.marginRate >= 0 ? 'up' : 'down' },
-          f.rateDelta(row.marginRate) + '/kg'))))
+          f.rateDelta(row.marginRate) + '/MT'))))
   ];
 }
 
@@ -586,19 +630,24 @@ function stepReview() {
     h('div', { class: 'mt-q' }, sell ? 'Confirm the sale' : 'Confirm the purchase'),
     h('div', { class: 'mt-hint' }, 'One tap to book. You can undo straight after.'),
     h('div', { class: 'mrev' },
+      row('Sauda No.', ms.sauda_no || '—', editSauda),
       row(sell ? 'Buyer' : 'Supplier', ms.party.name, () => jump('who')),
       row('Material', ms.sku.display, () => jump('what')),
+      sell ? row('From', saleWarehouses() || 'no warehouse recorded')
+           : row('Warehouse', ms.warehouse || 'Not set', pickWarehouse),
       row('Quantity', f.qty(ms.qty_g), () => jump('qty')),
-      row('Rate', f.rate(ms.rate_paise) + '/kg', () => jump('rate')),
+      row('Rate', f.rate(ms.rate_paise) + '/MT', () => jump('rate')),
+      row('GST', ms.plus_gst ? 'Extra' : 'Included', () => { ms.plus_gst = !ms.plus_gst; paint(); }),
       row('Value', f.inr(valuePaise(ms.qty_g, ms.rate_paise))),
       row('Date', f.date(ms.date), openTerms),
+      row('Payment due', ms.payment_due ? f.date(ms.payment_due) : 'Not set', openTerms),
       row('Transport', termsSummary(), openTerms)),
     sell && cost
       ? h('div', { class: 'mlive ' + (margin >= 0 ? 'good' : 'bad') },
           h('div', { class: 'mlive-top' },
             h('b', { class: 'num ' + (margin >= 0 ? 'up' : 'down') }, f.inr(margin, { sign: true })),
-            h('span', { class: 'num ' + (margin >= 0 ? 'up' : 'down') }, f.rateDelta(marginRate) + '/kg')),
-          h('div', { class: 'mlive-sub' }, `bought at ${f.rate(cost)}, selling at ${f.rate(ms.rate_paise)}`))
+            h('span', { class: 'num ' + (margin >= 0 ? 'up' : 'down') }, f.rateDelta(marginRate) + '/MT')),
+          h('div', { class: 'mlive-sub' }, `bought at ${f.rate(cost)}/MT, selling at ${f.rate(ms.rate_paise)}/MT`))
       : null,
     ms.error ? h('div', { class: 'need' }, ms.error) : null
   ];
@@ -615,27 +664,72 @@ function termsSummary() {
   if (t.payment_terms) bits.push(t.payment_terms);
   if (t.eway) bits.push(`e-way: ${t.eway}`);
   if (t.remarks) bits.push(t.remarks);
+  if (ms.ex_place) bits.unshift(`Ex-${ms.ex_place}`);
   return bits.length ? bits.join(' · ') : 'Not set';
 }
 
 function openTerms() {
   const t = ms.terms;
+  const credit = [['Today', 0], ['+7d', 7], ['+15d', 15], ['+30d', 30], ['+45d', 45]];
   sheet('Transport & payment', [
     { key: 'date', label: 'Deal date', type: 'date', value: ms.date },
+    { key: 'payment_due', label: 'Payment due', type: 'date', value: ms.payment_due,
+      // counted from the deal date as it stands in this sheet, not as it was
+      chips: credit.map(([l, n]) => [l, get => addDays((get.date && get.date()) || ms.date, n)]) },
+    { key: 'ex_place', label: 'Ex-Place', value: ms.ex_place, placeholder: 'Mundra / Aslali / Other' },
     { key: 'transporter', label: 'Transporter', value: t.transporter, placeholder: 'Ekta' },
     { key: 'freight_by', label: 'Freight paid by', type: 'choice',
       options: ['Buyer', 'Seller'], value: t.freight_by },
     { key: 'delivery_by', label: 'Delivery by', type: 'choice',
       options: ['Buyer', 'Seller'], value: t.delivery_by },
-    { key: 'payment_terms', label: 'Payment', value: t.payment_terms, placeholder: '30 days' },
+    { key: 'payment_terms', label: 'Payment terms', value: t.payment_terms, placeholder: '30 days' },
     { key: 'eway', label: 'E-way bill', value: t.eway, placeholder: 'ASL to buyer' },
     { key: 'remarks', label: 'Note', value: t.remarks, placeholder: 'anything worth remembering' }
   ], values => {
+    const dateChanged = values.date && values.date !== ms.date;
     ms.date = values.date || ms.date;
-    delete values.date;
+    ms.payment_due = values.payment_due || '';
+    ms.ex_place = values.ex_place || '';
+    delete values.date; delete values.payment_due; delete values.ex_place;
     ms.terms = values;
+    if (dateChanged) refreshSauda(false);    // 1 April starts a new series
     paint();
   });
+}
+
+function editSauda() {
+  sheet('Sauda No.', [
+    { key: 'sauda', label: 'Sauda No.', value: ms.sauda_no, placeholder: 'LE/26-27/0001',
+      hint: 'Leave it blank to take the next number in this financial year.' }
+  ], async v => {
+    if (v.sauda) { ms.sauda_no = v.sauda; ms.saudaAuto = false; }
+    else await refreshSauda(true);
+    paint();
+  });
+}
+
+// Where a purchase lands. A sale needs no picker: it leaves from wherever the
+// lots it draws on are sitting, and the review shows which.
+function pickWarehouse() {
+  const names = ms.warehouses.map(w => w.name);
+  sheet('Warehouse', [
+    ...(names.length
+      ? [{ key: 'pick', label: 'Where will it sit?', type: 'choice', options: names, value: ms.warehouse }]
+      : []),
+    { key: 'add', label: names.length ? 'Or add a new one' : 'Warehouse name', placeholder: 'e.g. Mundra' }
+  ], async v => {
+    const added = (v.add || '').trim();
+    if (added) { await api.addWarehouse(added); await loadWarehouses(); }
+    ms.warehouse = added || v.pick || '';
+    if (ms.warehouse) rememberWarehouse(ms.warehouse);
+    paint();
+  });
+}
+
+function saleWarehouses() {
+  const open = ms.lots.filter(l => l.available_g > 0);
+  const used = open.length === 1 ? open : flow().rows.filter(r => r.take > 0).map(r => r.lot);
+  return [...new Set(used.map(l => l.warehouse).filter(Boolean))].join(', ');
 }
 
 function row(label, value, onEdit) {
@@ -649,14 +743,16 @@ function jump(name) {
 }
 
 // --------------------------------------------------------------- numpad
-function numpad(id, commit, label) {
+function numpad(id, commit, label, opts = {}) {
   const press = key => {
     if (key === 'del') ms.entry = ms.entry.slice(0, -1);
     else if (key === '.') { if (!ms.entry.includes('.')) ms.entry = (ms.entry || '0') + '.'; }
     else ms.entry = (ms.entry === '0' ? '' : ms.entry) + key;
     paint();
   };
-  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0'];
+  // Per-MT rates are whole rupees and usually end in zeros, so the rate pad
+  // swaps the decimal point for a double-zero key.
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', opts.noDot ? '00' : '.', '0'];
   return h('div', { class: 'mpad', data: { pad: id } },
     ...keys.map(k => h('button', { class: 'mkey', onclick: () => press(k) }, k)),
     h('button', { class: 'mkey fn', onclick: () => press('del') }, '⌫'));
@@ -698,7 +794,7 @@ function foot(step) {
   // qty and rate
   const value = step === 'qty'
     ? (ms.entry !== '' ? Math.round(parseFloat(ms.entry || '0') * MT) : ms.qty_g)
-    : (ms.entry !== '' ? Math.round(parseFloat(ms.entry || '0') * 100) : ms.rate_paise);
+    : (ms.entry !== '' ? f.fromPerMt(Number(ms.entry)) : ms.rate_paise);
 
   return h('div', { class: 'mt-foot' },
     h('button', {
@@ -733,6 +829,11 @@ async function book() {
       qty_g: ms.qty_g,
       rate_paise: ms.rate_paise,
       deal_date: ms.date,
+      sauda_no: (ms.sauda_no || '').trim() || undefined,
+      warehouse: ms.side === 'buy' ? (ms.warehouse || undefined) : undefined,
+      plus_gst: !!ms.plus_gst,
+      payment_due: ms.payment_due || undefined,
+      ex_place: (ms.ex_place || '').trim() || undefined,
       transporter: ms.terms.transporter || undefined,
       freight_by: ms.terms.freight_by || undefined,
       delivery_by: ms.terms.delivery_by || undefined,
@@ -1182,6 +1283,10 @@ export async function renderMobileTape(root, appCtx) {
           { qty: full.qty_g, short: `${full.party_name} · ${f.qty(full.qty_g)}` },
           { targetColor: sell ? 'var(--up)' : 'var(--accent)' }));
       }
+      card.appendChild(h('div', { class: 'mdeal-meta' },
+        ...[full.ref, full.warehouse, full.payment_due ? `due ${f.date(full.payment_due)}` : null,
+            full.plus_gst ? 'GST extra' : 'GST included', full.ex_place ? `Ex-${full.ex_place}` : null]
+          .filter(Boolean).map(x => h('span', {}, x))));
       card.appendChild(h('div', { class: 'mflow-links' },
         ...lines.map(a => h('div', { class: 'mflow-link' },
           h('i', { style: { background: a.margin_paise >= 0 ? 'var(--up)' : 'var(--down)' } }),
@@ -1304,7 +1409,16 @@ function sheet(title, fields, onSave) {
       inputmode: fl.type === 'tel' ? 'tel' : undefined
     });
     inputs[fl.key] = () => input.value.trim();
-    return h('label', { class: 'msheet-field' }, h('span', {}, fl.label), input);
+    const chips = fl.chips
+      ? h('div', { class: 'msheet-dchips' }, ...fl.chips.map(([l, fn]) => h('button', {
+          class: 'mchip', type: 'button', onclick: () => { input.value = fn(inputs); }
+        }, l)))
+      : null;
+    // a <div>, not a <label>, when it holds buttons - a tap on a chip inside a
+    // label would also open the date picker
+    return h(chips ? 'div' : 'label', { class: 'msheet-field' },
+      h('span', {}, fl.label), input, chips,
+      fl.hint ? h('small', { class: 'msheet-hint' }, fl.hint) : null);
   });
 
   const toggles = body.filter(el => el.classList && el.classList.contains('msheet-toggle'));
@@ -1333,7 +1447,8 @@ function sheet(title, fields, onSave) {
 // ==================================================================== setup
 export async function renderMobileSetup(root, appCtx) {
   ctx = appCtx;
-  const [{ tree }, { parties }] = await Promise.all([api.catalogTree(), api.partyList()]);
+  const [{ tree }, { parties }, { warehouses }] = await Promise.all(
+    [api.catalogTree(), api.partyList(), api.warehouses()]);
   const open = ctx.setupOpen || (ctx.setupOpen = {});
 
   const add = async (body, what) => {
@@ -1350,13 +1465,18 @@ export async function renderMobileSetup(root, appCtx) {
     if (v && v.trim()) run(v.trim());
   };
 
-  const editParty = (p) => sheet(p ? 'Edit party' : 'Add buyer or seller', [
-    { key: 'name', label: 'Name', value: p ? p.name : '', placeholder: 'Krishna Dehgam' },
+  // A party: name, GSTIN, phone, address. PAN is read off the GSTIN, so it only
+  // needs typing for a party with no GSTIN. No buyer/seller split.
+  const editParty = (p) => sheet(p ? 'Edit party' : 'Add party', [
+    { key: 'name', label: 'Party name', value: p ? p.name : '', placeholder: 'Krishna Dehgam' },
+    { key: 'gstin', label: 'GSTIN', value: p ? (p.gstin || '') : '', placeholder: '24ABCDE1234F1Z5',
+      hint: p && p.gstin ? `PAN ${p.pan} · ${p.state || ''}` : 'PAN is filled in from the GSTIN.' },
+    { key: 'pan', label: 'PAN — only if there is no GSTIN', value: p && !p.gstin ? (p.pan || '') : '',
+      placeholder: 'ABCDE1234F' },
     { key: 'phone', label: 'Phone', type: 'tel', value: p ? (p.phone || '') : '',
       placeholder: '+91 98250 00000' },
-    { key: 'city', label: 'Location', value: p ? (p.city || '') : '', placeholder: 'Ahmedabad' },
-    { key: 'is_customer', label: 'Buys from me', type: 'toggle', value: p ? !!p.is_customer : true },
-    { key: 'is_supplier', label: 'Sells to me', type: 'toggle', value: p ? !!p.is_supplier : false }
+    { key: 'address', label: 'Address', value: p ? (p.address || p.city || '') : '',
+      placeholder: 'Full address' }
   ], async values => {
     if (!values.name) throw new Error('Name is required');
     await api.partySave({ ...values, id: p ? p.id : undefined });
@@ -1375,23 +1495,77 @@ export async function renderMobileSetup(root, appCtx) {
   const tab = ctx.setupTab || (ctx.setupTab = 'parties');
   const show = t => { ctx.setupTab = t; renderMobileSetup(root, ctx); };
 
+  const partyCard = p => h('div', { class: 'mflow-card' },
+    h('div', { class: 'mflow-head' },
+      h('div', { class: 'grow', onclick: () => editParty(p) },
+        h('b', {}, p.name),
+        h('span', {}, p.gstin ? `${p.gstin}${p.state ? ' · ' + p.state : ''}` : 'no GSTIN')),
+      h('div', { class: 'mflow-money' },
+        h('b', { class: 'num' }, p.deal_count ? `${p.deal_count}` : '—'),
+        h('span', {}, p.deal_count ? 'deals' : 'unused')),
+      h('button', { class: 'msetup-x', onclick: () => dropParty(p) }, '×')),
+    p.phone || p.address
+      ? h('div', { class: 'mparty-addr' }, [p.phone, p.address].filter(Boolean).join(' · '))
+      : null);
+
+  // Hundreds of parties: only the matches are drawn, and only the list is
+  // redrawn while typing so the search box keeps its focus.
+  const plist = h('div', {});
+  const pcount = h('div', { class: 'mt-hint', style: { margin: '2px 0 10px' } }, '');
+  const paintParties = term => {
+    const t = (term || '').trim().toLowerCase();
+    const hits = !t ? parties : parties.filter(p =>
+      [p.name, p.gstin, p.address, p.phone].some(x => (x || '').toLowerCase().includes(t)));
+    pcount.textContent = hits.length > 60
+      ? `Showing 60 of ${hits.length} — search to narrow`
+      : `${hits.length} part${hits.length === 1 ? 'y' : 'ies'}`;
+    mount(plist, ...hits.slice(0, 60).map(partyCard));
+  };
+  paintParties('');
+
   const partiesView = [
     h('div', { class: 'mflow' },
       h('button', { class: 'mmore', style: { marginBottom: '10px' }, onclick: () => editParty(null) },
-        '+ Add buyer or seller'),
-      ...parties.map(p => h('div', { class: 'mflow-card' },
+        '+ Add party'),
+      h('div', { class: 'msearch', style: { marginBottom: '4px' } },
+        h('span', { class: 'dim' }, '⌕'),
+        h('input', { placeholder: 'Name, GSTIN, address or phone',
+          oninput: e => paintParties(e.target.value) })),
+      pcount,
+      plist)
+  ];
+
+  // A warehouse is a name and a location. Renaming one is carried through every
+  // lot and deal that already records it, on the server, in one transaction.
+  const editWh = w => sheet(w ? 'Edit warehouse' : 'Add warehouse', [
+    { key: 'name', label: 'Name', value: w ? w.name : '', placeholder: 'Mundra' },
+    { key: 'location', label: 'Location', value: w ? (w.location || '') : '',
+      placeholder: 'Plot 12, Mundra Port' }
+  ], async v => {
+    if (!v.name) throw new Error('Name is required');
+    await api.saveWarehouse({ name: v.name, location: v.location, old_name: w ? w.name : undefined });
+    toast(w ? (w.name !== v.name ? `Renamed to ${v.name}` : 'Saved') : `Added ${v.name}`);
+    renderMobileSetup(root, ctx);
+  });
+  const dropWh = async w => {
+    if (!window.confirm(`Remove ${w.name}?`)) return;
+    try { await api.removeWarehouse(w.name); toast(`Removed ${w.name}`); renderMobileSetup(root, ctx); }
+    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
+  };
+  const warehousesView = [
+    h('div', { class: 'mflow' },
+      h('button', { class: 'mmore', style: { marginBottom: '10px' }, onclick: () => editWh(null) },
+        '+ Add warehouse'),
+      ...warehouses.map(w => h('div', { class: 'mflow-card' },
         h('div', { class: 'mflow-head' },
-          h('div', { class: 'grow', onclick: () => editParty(p) },
-            h('b', {}, p.name),
-            h('span', {}, [p.phone, p.city].filter(Boolean).join(' · ') || 'no contact details')),
+          h('div', { class: 'grow', onclick: () => editWh(w) },
+            h('b', {}, w.name),
+            h('span', {}, w.location || 'no location set')),
           h('div', { class: 'mflow-money' },
-            h('b', { class: 'num' }, p.deal_count ? `${p.deal_count}` : '—'),
-            h('span', {}, p.deal_count ? 'deals' : 'unused')),
-          h('button', { class: 'msetup-x', onclick: () => dropParty(p) }, '×')),
-        h('div', { class: 'mparty-tags' },
-          p.is_customer ? h('span', { class: 'tag up' }, 'Buyer') : null,
-          p.is_supplier ? h('span', { class: 'tag' }, 'Seller') : null,
-          !p.is_customer && !p.is_supplier ? h('span', { class: 'tag' }, 'No role set') : null))))
+            h('b', { class: 'num' }, w.stock_g ? f.qty(w.stock_g) : '—'),
+            h('span', {}, w.stock_g ? 'in stock' : 'empty')),
+          h('button', { class: 'msetup-x', onclick: () => dropWh(w) }, '×')))),
+      warehouses.length ? null : h('div', { class: 'empty' }, h('h3', {}, 'No warehouses yet')))
   ];
 
   const materialsView = [
@@ -1451,12 +1625,15 @@ export async function renderMobileSetup(root, appCtx) {
 
   mount(root, h('div', { class: 'view' },
     h('div', { class: 'mflow', style: { paddingTop: '14px' } },
-      h('div', { class: 'mchips g2 filter', style: { padding: '0 0 10px' } },
+      h('div', { class: 'mchips g3 filter', style: { padding: '0 0 10px' } },
         h('button', {
           class: 'mchip' + (tab === 'parties' ? ' on' : ''), onclick: () => show('parties')
-        }, `Buyers & sellers · ${parties.length}`),
+        }, `Parties · ${parties.length}`),
+        h('button', {
+          class: 'mchip' + (tab === 'warehouses' ? ' on' : ''), onclick: () => show('warehouses')
+        }, `Warehouses · ${warehouses.length}`),
         h('button', {
           class: 'mchip' + (tab === 'materials' ? ' on' : ''), onclick: () => show('materials')
         }, `Materials · ${tree.length}`))),
-    ...(tab === 'parties' ? partiesView : materialsView)));
+    ...(tab === 'parties' ? partiesView : tab === 'warehouses' ? warehousesView : materialsView)));
 }

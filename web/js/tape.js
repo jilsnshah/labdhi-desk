@@ -5,6 +5,11 @@ import * as f from './fmt.js';
 import { api } from './api.js';
 import { ladder } from './desk.js';
 import { makeFilters } from './filters.js';
+
+const todayISO = () => {
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
 import { showNode } from './flow.js';
 
 let tapeState = { query: '', filters: {}, rows: [], matched: 0, ctx: null };
@@ -133,7 +138,7 @@ export function tradeRow(d, ctx) {
     h('div', { class: 'nums' },
       sell
         ? [h('b', { class: 'num ' + pnlClass(d.margin_paise) }, f.inr(d.margin_paise, { sign: true, compact: true })),
-           h('span', { class: 'num' }, f.rateDelta(d.margin_rate_paise || 0) + '/kg')]
+           h('span', { class: 'num' }, f.rateDelta(d.margin_rate_paise || 0) + '/MT')]
         : [h('b', { class: 'num muted' }, d.sold_g ? f.qty(d.sold_g) : '—'),
            h('span', {}, 'sold on')]));
 
@@ -154,7 +159,11 @@ function dealDetail(deal, ctx, closeSelf) {
     h('div', { class: 'chipline', style: { marginBottom: '10px' } },
       h('span', { class: 'tag' }, deal.ref),
       h('span', { class: 'tag' }, deal.status),
-      deal.plus_gst ? h('span', { class: 'tag' }, 'rate is basic, GST extra') : null,
+      deal.plus_gst ? h('span', { class: 'tag' }, 'GST extra')
+                    : h('span', { class: 'tag' }, 'rate includes GST'),
+      deal.warehouse ? h('span', { class: 'tag' }, `warehouse: ${deal.warehouse}`) : null,
+      deal.payment_due ? h('span', { class: 'tag' + (deal.payment_due < todayISO() ? ' down' : '') },
+        `payment due ${f.date(deal.payment_due)}`) : null,
       deal.freight_by ? h('span', { class: 'tag' }, `freight: ${deal.freight_by}`) : null,
       deal.delivery_by ? h('span', { class: 'tag' }, `delivery: ${deal.delivery_by}`) : null,
       deal.payment_terms ? h('span', { class: 'tag' }, `pay: ${deal.payment_terms}`) : null,
@@ -217,8 +226,11 @@ export async function renderPosition(root, skuId, ctx) {
       stat('In stock', f.qty(p.stock_g), `${pos.lots.length} open lots`, 'var(--ink)'),
       stat('Weighted cost', f.rate(p.cost_paise), f.inr(p.stock_value_paise, { compact: true }) + ' tied up', 'var(--ink)'),
       stat('Mark', p.mark_paise ? f.rate(p.mark_paise) : '—', p.mark_source || 'tap to set', 'var(--accent)', async () => {
-        const v = prompt('Current market rate ₹/kg', p.mark_paise ? (p.mark_paise / 100).toFixed(2) : '');
-        if (v) { await api.setMark(skuId, v); ctx.go('position', skuId); }
+        const v = prompt('Current market rate, ₹ per MT', p.mark_paise ? String(f.perMt(p.mark_paise)) : '');
+        if (!v) return;
+        const paise = f.fromPerMt(Number(String(v).replace(/[^0-9.]/g, '')));
+        if (paise === null) { toast('Rates go in steps of ₹10 per MT', { kind: 'err' }); return; }
+        await api.setMark(skuId, paise); ctx.go('position', skuId);
       }),
       stat('Open P&L', f.inr(p.unrealised_paise, { sign: true, compact: true }),
         `realised ${f.inr(p.realised_paise, { compact: true })}`,

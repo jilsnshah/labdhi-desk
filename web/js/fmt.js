@@ -28,9 +28,23 @@ export function inr(paise, opts = {}) {
   });
 }
 
-// Rates always show paise - a trader argues over 5 paise.
-export const rate = p => '₹' + ((p || 0) / RUPEE).toFixed(2);
-export const rateDelta = p => (p >= 0 ? '+' : '−') + '₹' + Math.abs((p || 0) / RUPEE).toFixed(2);
+// Rates are stored as paise per kg and shown per MT, the way the trade quotes
+// them: 9825 paise/kg is Rs 98,250/MT. One paisa per kg is Rs 10 per MT, so a
+// per-MT figure is exact in Rs 10 steps and nothing finer.
+export const PER_MT = 10;                         // Rs per MT for 1 paisa per kg
+export const perMt = p => Math.round((p || 0) * PER_MT);
+export const rate = p => '₹' + perMt(p).toLocaleString('en-IN');
+export const rateDelta = p =>
+  (p >= 0 ? '+' : '−') + '₹' + Math.abs(perMt(p)).toLocaleString('en-IN');
+
+// Rs per MT typed by the trader -> paise per kg, or null when it cannot be held
+// exactly. A figure that would have to be rounded is refused, never adjusted.
+export function fromPerMt(rupees) {
+  const r = Number(rupees);
+  if (!isFinite(r) || r < 0) return null;
+  if (Math.round(r) !== r || r % PER_MT !== 0) return null;
+  return r / PER_MT;
+}
 
 export function date(iso) {
   if (!iso) return '';

@@ -240,6 +240,25 @@ main{overflow:auto;padding:26px 24px 60px}
   width:170px;font-size:22px;outline:none;font-family:var(--mono);text-align:right}
 .ghost-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);background:var(--surface)}
 
+/* ---------------------------------------------------------- deal identity */
+.sauda-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:-8px 0 16px}
+.sauda-label{font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
+.sauda-input{width:190px;text-align:left;font-size:17px;padding:10px 13px}
+.wh-add{display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap}
+.rate-err{color:var(--down);font-size:14px;font-weight:600;margin-top:8px;min-height:0}
+.rate-err:empty{display:none}
+.gst-check{display:inline-flex;align-items:center;gap:10px;margin-top:16px;cursor:pointer;
+  padding:11px 15px;border:1px solid var(--line);border-radius:12px;background:var(--bg)}
+.gst-check input{width:19px;height:19px;accent-color:var(--accent);cursor:pointer}
+.gst-check span{font-weight:620;font-size:15px}
+.gst-check small{color:var(--ink-3);font-size:13px}
+.due-chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.rate-extras{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+.explace{display:flex;flex-direction:column;gap:6px;margin-top:16px}
+.explace span{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.explace .ghost-input{width:240px;text-align:left;font-family:var(--sans);font-size:16px;padding:11px 13px}
+.due-chips .chip{padding:7px 11px;font-size:13px}
+
 /* ---------------------------------------------------------- the split */
 /* Every lot starts at zero and he types into the ones he wants. The only
    number to watch is "left to assign", parked beside the rows and sticky, so

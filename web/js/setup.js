@@ -11,7 +11,8 @@ import { api } from './api.js';
 let openMaterial = null, openGrade = null, filter = '';
 
 export async function renderSetup(root, ctx) {
-  const [{ tree: all }, { parties }] = await Promise.all([api.catalogTree(), api.partyList()]);
+  const [{ tree: all }, { parties }, { warehouses }] = await Promise.all(
+    [api.catalogTree(), api.partyList(), api.warehouses()]);
   const term = filter.toLowerCase();
   const hit = (...parts) => !term || parts.some(x => (x || '').toLowerCase().includes(term));
   const tree = !term ? all : all
@@ -48,24 +49,64 @@ export async function renderSetup(root, ctx) {
     catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
   };
 
-  // A counterparty is a name, a phone and a place. Everything else about them
-  // the deals already say.
-  function partyRow(p) {
-    const name = h('input', { class: 'ghost-input', value: p ? p.name : '',
-      placeholder: 'Name', style: { textAlign: 'left', width: '220px', fontFamily: 'var(--sans)' } });
-    const phone = h('input', { class: 'ghost-input', value: p ? (p.phone || '') : '',
-      placeholder: 'Phone', style: { textAlign: 'left', width: '190px', fontFamily: 'var(--sans)' } });
-    const city = h('input', { class: 'ghost-input', value: p ? (p.city || '') : '',
-      placeholder: 'Location', style: { textAlign: 'left', width: '170px', fontFamily: 'var(--sans)' } });
-    const buyer = h('button', { class: 'chip' + (p && p.is_customer ? ' on' : ''),
-      onclick: e => e.target.classList.toggle('on') }, 'Buys from me');
-    const seller = h('button', { class: 'chip' + (p && p.is_supplier ? ' on' : ''),
-      onclick: e => e.target.classList.toggle('on') }, 'Sells to me');
-    const collect = () => ({
-      name: name.value.trim(), phone: phone.value.trim(), city: city.value.trim(),
-      is_customer: buyer.classList.contains('on'), is_supplier: seller.classList.contains('on')
+  // A warehouse is a name and a location. Renaming one is carried through every
+  // lot and deal that already records it, on the server, in one transaction.
+  function whRow(w) {
+    const box = (value, placeholder, width) => h('input', {
+      class: 'ghost-input', value: value || '', placeholder,
+      style: { textAlign: 'left', width, fontFamily: 'var(--sans)' }
     });
-    return h('div', { class: 'party-row' }, name, phone, city, buyer, seller,
+    const name = box(w && w.name, 'Warehouse name, e.g. Mundra', '240px');
+    const location = box(w && w.location, 'Location / address', '340px');
+    const save = async () => {
+      const body = { name: name.value.trim(), location: location.value.trim() };
+      if (!body.name) { toast('Name is required', { kind: 'err' }); return; }
+      if (w) body.old_name = w.name;
+      try {
+        await api.saveWarehouse(body);
+        toast(w ? (w.name !== body.name ? `Renamed to ${body.name}` : 'Saved') : `Added ${body.name}`);
+        refresh();
+      } catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
+    };
+    return h('div', { class: 'party-row' }, name, location,
+      w ? h('span', { class: 'dim', style: { fontSize: '13px' } },
+            w.stock_g ? `${f.qty(w.stock_g)} in stock` : 'empty') : null,
+      h('button', { class: 'chip on', style: { marginLeft: 'auto' }, onclick: save }, w ? 'Save' : 'Add'),
+      w ? h('button', { class: 'setup-x', onclick: () => dropWh(w.name) }, '×') : null);
+  }
+  async function dropWh(name) {
+    if (!window.confirm(`Remove warehouse ${name}?`)) return;
+    try { await api.removeWarehouse(name); toast(`Removed ${name}`); refresh(); }
+    catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
+  }
+
+  // A party is a name, a phone, an address, a GSTIN and its PAN. There is no
+  // buyer/seller split - the same firm sits on either side of a deal. PAN is
+  // read off the GSTIN; it only takes typing when there is no GSTIN at all.
+  function partyRow(p) {
+    const box = (value, placeholder, width, mono) => h('input', {
+      class: 'ghost-input', value: value || '', placeholder,
+      style: { textAlign: 'left', width, fontFamily: mono ? 'var(--mono)' : 'var(--sans)' }
+    });
+    const name = box(p && p.name, 'Party name', '230px');
+    const gstin = box(p && p.gstin, 'GSTIN', '180px', true);
+    const pan = box(p && p.pan, 'PAN', '130px', true);
+    const phone = box(p && p.phone, 'Phone', '160px');
+    const address = box(p && (p.address || p.city), 'Address', '360px');
+    const syncPan = () => {
+      const g = gstin.value.replace(/\s+/g, '').toUpperCase();
+      pan.readOnly = g.length >= 12;
+      if (pan.readOnly) pan.value = g.slice(2, 12);
+      pan.title = pan.readOnly ? 'Taken from the GSTIN' : '';
+    };
+    gstin.addEventListener('input', syncPan);
+    syncPan();
+    const collect = () => ({
+      name: name.value.trim(), gstin: gstin.value.trim(), pan: pan.value.trim(),
+      phone: phone.value.trim(), address: address.value.trim()
+    });
+    return h('div', { class: 'party-row' }, name, gstin, pan, phone, address,
+      p && p.state ? h('span', { class: 'dim', style: { fontSize: '13px' } }, p.state) : null,
       h('span', { class: 'dim', style: { marginLeft: 'auto', fontSize: '13px' } },
         p ? (p.deal_count ? `${p.deal_count} deals` : 'unused') : ''),
       h('button', { class: 'chip on', onclick: () => {
@@ -76,13 +117,38 @@ export async function renderSetup(root, ctx) {
       p ? h('button', { class: 'setup-x', onclick: () => dropParty(p) }, '×') : null);
   }
 
+  // Hundreds of parties: render the ones that match, not all of them.
+  const plist = h('div', { class: 'party-list' });
+  const pcount = h('span', { class: 'dim' }, '');
+  const paintParties = term => {
+    const t = (term || '').trim().toLowerCase();
+    const hits = !t ? parties : parties.filter(p =>
+      [p.name, p.gstin, p.address, p.phone].some(x => (x || '').toLowerCase().includes(t)));
+    pcount.textContent = hits.length > 60
+      ? `showing 60 of ${hits.length} — search to narrow`
+      : `${hits.length} part${hits.length === 1 ? 'y' : 'ies'}`;
+    mount(plist, ...hits.slice(0, 60).map(partyRow));
+  };
+  paintParties('');
+
   mount(view,
     h('div', { class: 'section-head' },
-      h('h2', {}, 'Buyers and sellers'), h('i', { class: 'rule' }),
-      h('span', { class: 'dim' }, `${parties.length} counterparties`)),
+      h('h2', {}, 'Parties'), h('i', { class: 'rule' }), pcount),
+    h('div', { class: 'party-list' }, partyRow(null)),
+    h('div', { class: 'searchbar', style: { maxWidth: 'none', margin: '10px 0' } },
+      h('span', { class: 'dim' }, '⌕'),
+      h('input', {
+        placeholder: 'Search name, GSTIN, address or phone',
+        oninput: e => paintParties(e.target.value)
+      })),
+    plist,
+
+    h('div', { class: 'section-head', style: { marginTop: '34px' } },
+      h('h2', {}, 'Warehouses'), h('i', { class: 'rule' }),
+      h('span', { class: 'dim' }, 'where stock physically sits')),
     h('div', { class: 'party-list' },
-      partyRow(null),
-      ...parties.map(partyRow)),
+      whRow(null),
+      ...warehouses.map(whRow)),
 
     h('div', { class: 'section-head', style: { marginTop: '34px' } },
       h('h2', {}, 'Materials, grades and manufacturers'), h('i', { class: 'rule' }),

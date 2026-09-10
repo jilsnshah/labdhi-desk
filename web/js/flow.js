@@ -211,7 +211,7 @@ function showEdge(e, lot, sale) {
         h('span', { class: 'tag' }, `bought ${f.rate(e.cost_paise)} · ${lot.deal_ref}`),
         h('span', { class: 'tag' }, `sold ${f.rate(e.sale_rate_paise)} · ${sale.deal_ref}`),
         h('span', { class: 'tag ' + pnlClass(e.margin_paise) },
-          `${f.rateDelta(e.margin_rate_paise)}/kg = ${f.inr(e.margin_paise, { sign: true })}`),
+          `${f.rateDelta(e.margin_rate_paise)}/MT = ${f.inr(e.margin_paise, { sign: true })}`),
         h('span', { class: 'tag' }, `picked by ${e.method}`))));
 }
 

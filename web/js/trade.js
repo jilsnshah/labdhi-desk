@@ -58,10 +58,22 @@ export function startTrade(side, opts = {}, appCtx = {}) {
     busy: false,
     error: '',
     termsOpen: false,   // must live in state: a re-render rebuilds the <details>
+    sauda_no: '',       // shown before booking; the trader may overwrite it
+    saudaAuto: true,    // still the issued number, so a date change may renumber it
+    warehouse: '',      // buy: where it lands. sell: narrows lots to one godown
+    warehouses: [],
+    whQuery: '',
+    plus_gst: true,     // the trade convention: "98.25+" means GST extra
+    payment_due: '',
+    ex_place: '',       // pricing basis, recorded as typed
+    rateInvalid: false, // the box holds a figure that cannot be stored exactly
+    rateText: '',       // ...and this is that figure, kept so a re-render cannot erase it
     date: today()
   };
   loadParties('');
   loadOptions('material');
+  loadWarehouses();
+  refreshSauda(true);
   if (opts.sku && (opts.sku.id || opts.sku.sku_id)) preloadSku(opts.sku.id || opts.sku.sku_id);
 }
 
@@ -153,7 +165,8 @@ async function preloadSku(skuId) {
 async function loadMaterial(skuId) {
   const [pos, lots] = await Promise.all([
     api.position(skuId).catch(() => null),
-    api.lots(skuId).catch(() => ({ lots: [] }))
+    api.lots(skuId, state.side === 'sell' ? (state.warehouse || undefined) : undefined)
+      .catch(() => ({ lots: [] }))
   ]);
   if (!state) return;
   state.position = pos;
@@ -168,7 +181,120 @@ async function loadMaterial(skuId) {
   render();
 }
 
-const stockG = () => (state.position ? state.position.stock_g : 0);
+// On a sale narrowed to one warehouse, the most you can sell is what sits there.
+const stockG = () => {
+  if (state.side === 'sell' && state.warehouse) {
+    return state.lots.reduce((s, l) => s + (l.available_g || 0), 0);
+  }
+  return state.position ? state.position.stock_g : 0;
+};
+
+async function loadWarehouses() {
+  const r = await api.warehouses().catch(() => ({ warehouses: [] }));
+  if (!state) return;
+  state.warehouses = r.warehouses;
+  render();
+}
+
+async function refreshSauda(force) {
+  const r = await api.saudaNext(state.date).catch(() => null);
+  if (!state || !r) return;
+  if (force || state.saudaAuto) {
+    state.sauda_no = r.sauda_no; state.saudaAuto = true;
+    render();
+  }
+}
+
+function addDays(iso, days) {
+  const d = new Date(iso + 'T00:00:00');
+  d.setDate(d.getDate() + days);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// ---------------------------------------------------------------- sauda no
+function blockSauda() {
+  return h('div', { class: 'sauda-row' },
+    h('span', { class: 'sauda-label' }, 'Sauda No.'),
+    h('input', {
+      class: 'ghost-input num sauda-input', data: { fkey: 'sauda' }, value: state.sauda_no,
+      placeholder: 'LE/26-27/0001',
+      oninput: e => { state.sauda_no = e.target.value; state.saudaAuto = false; }
+    }),
+    h('button', { class: 'chip', title: 'Issue the next number', onclick: () => refreshSauda(true) }, '↻'),
+    h('span', { class: 'dim', style: { fontSize: '13px' } },
+      state.saudaAuto ? 'next in this financial year' : 'your number'));
+}
+
+// ---------------------------------------------------------------- warehouse
+// Buying: which godown the material lands in. Selling: the godown to sell out
+// of, which narrows the lots on offer. "Any" leaves every lot available, and the
+// sale then records whichever warehouses its lots actually came from.
+function blockWarehouse() {
+  const sell = state.side === 'sell';
+  if (!lineChosen()) return h('div', { class: 'block pending' }, label('Warehouse', false));
+
+  if (sell) {
+    const held = new Map();
+    let unrecorded = 0;
+    for (const l of (state.position ? state.position.lots : [])) {
+      if (!(l.available_g > 0)) continue;
+      if (l.warehouse) held.set(l.warehouse, (held.get(l.warehouse) || 0) + l.available_g);
+      else unrecorded += l.available_g;
+    }
+    return h('div', { class: 'block' },
+      label('Selling out of', true,
+        unrecorded ? `${f.qty(unrecorded)} has no warehouse recorded` : 'narrows the lots below'),
+      h('div', { class: 'chips' },
+        h('button', { class: 'chip' + (state.warehouse ? '' : ' on'), onclick: () => pickSellWarehouse('') },
+          'Any warehouse'),
+        ...[...held].map(([name, g]) => h('button', {
+          class: 'chip' + (state.warehouse === name ? ' on' : ''), onclick: () => pickSellWarehouse(name)
+        }, name, h('small', {}, f.qty(g, { short: true }))))));
+  }
+
+  const q = state.whQuery.trim();
+  const exact = state.warehouses.some(w => w.name.toLowerCase() === q.toLowerCase());
+  return h('div', { class: 'block' },
+    label('Warehouse', !!state.warehouse, 'where this stock will sit'),
+    h('div', { class: 'chips' },
+      ...state.warehouses.map(w => h('button', {
+        class: 'chip' + (state.warehouse === w.name ? ' on' : ''),
+        onclick: () => { state.warehouse = state.warehouse === w.name ? '' : w.name; render(); }
+      }, w.name, w.stock_g ? h('small', {}, f.qty(w.stock_g, { short: true })) : null))),
+    h('div', { class: 'wh-add' },
+      h('input', {
+        class: 'ghost-input', data: { fkey: 'wh' }, placeholder: 'New warehouse, e.g. Mundra',
+        value: state.whQuery, style: { textAlign: 'left', fontFamily: 'var(--sans)', width: '260px' },
+        oninput: e => { state.whQuery = e.target.value; },
+        onkeydown: e => { if (e.key === 'Enter') addWarehouseHere(); }
+      }),
+      q && !exact ? h('button', { class: 'chip ghost', onclick: addWarehouseHere }, `+ Add "${q}"`) : null));
+}
+
+async function addWarehouseHere() {
+  const name = state.whQuery.trim();
+  if (!name) return;
+  try {
+    await api.addWarehouse(name);
+    state.whQuery = ''; state.warehouse = name;
+    loadWarehouses();
+  } catch (err) { state.error = err.message; render(); }
+}
+
+async function pickSellWarehouse(name) {
+  state.warehouse = name;
+  state.alloc = {}; state.allocText = {};
+  const skuId = state.sku && state.sku.id;
+  if (skuId) {
+    const r = await api.lots(skuId, name || undefined).catch(() => ({ lots: [] }));
+    if (!state) return;
+    state.lots = r.lots || [];
+    const max = stockG();
+    if (state.qty_g > max) state.qty_g = max;
+  }
+  render();
+}
 
 // ---------------------------------------------------------------- the split
 // Every lot starts at zero. The trader types what he wants out of each one and
@@ -234,7 +360,7 @@ const ready = () => state.party && lineChosen() && state.qty_g > 0 && state.rate
   && (state.side === 'buy' || (state.sku && state.sku.id));
 
 function canBook() {
-  if (!ready() || state.busy) return false;
+  if (!ready() || state.busy || state.rateInvalid) return false;
   if (state.side === 'buy') return true;
   const fl = flow();
   return fl.short === 0 && fl.over === 0;   // exact, or not at all
@@ -257,10 +383,12 @@ function render() {
         h('div', { class: 'trade-sub' }, sell ? 'material out · margin booked' : 'material in · new stock'),
         h('button', { class: 'trade-back', onclick: () => ctx.go('desk') }, 'Cancel')),
 
+      blockSauda(),
       blockParty(),
       blockLevel('material'),
       blockLevel('grade'),
       blockLevel('manufacturer'),
+      blockWarehouse(),
       blockQty(),
       blockRate(),
       sell ? blockSplit() : null,
@@ -435,26 +563,78 @@ function blockRate() {
   const done = state.rate_paise > 0;
   const pos = state.position;
   const hint = state.side === 'sell'
-    ? (pos && pos.cost_paise ? `your average cost is ${f.rate(pos.cost_paise)}` : null)
-    : (pos && pos.mark_paise ? `last sold at ${f.rate(pos.mark_paise)}` : null);
+    ? (pos && pos.cost_paise ? `your average cost is ${f.rate(pos.cost_paise)}/MT` : null)
+    : (pos && pos.mark_paise ? `last sold at ${f.rate(pos.mark_paise)}/MT` : null);
   return h('div', { class: 'block' + (state.qty_g ? '' : ' pending') },
-    label('Rate  (₹ per kg, basic)', done, hint),
+    label('Rate  (₹ per MT)', done, hint),
     h('div', { class: 'dial' },
-      h('button', { class: 'step', onclick: () => bumpRate(-25) }, '−'),
-      ui.rateDial = h('div', { class: 'dial-value num' }, '₹' + (state.rate_paise / 100).toFixed(2)),
-      h('button', { class: 'step', onclick: () => bumpRate(25) }, '+'),
+      h('button', { class: 'step', onclick: () => bumpRate(-10) }, '−'),
+      ui.rateDial = h('div', { class: 'dial-value num' }, f.rate(state.rate_paise)),
+      h('button', { class: 'step', onclick: () => bumpRate(10) }, '+'),
       h('input', {
-        class: 'ghost-input num', data: { fkey: 'rate' }, placeholder: '98.25',
-        value: state.rate_paise ? (state.rate_paise / 100).toFixed(2) : '',
-        oninput: e => setRate(Math.round(parseFloat(e.target.value || 0) * 100), true)
-      })),
-    h('div', { class: 'chips', style: { marginTop: '16px' } },
-      ...[-100, -50, -25, 25, 50, 100].map(d =>
+        class: 'ghost-input num', data: { fkey: 'rate' }, placeholder: '98250',
+        // an inexact figure stays in the box exactly as typed; otherwise the box
+        // mirrors the stored rate
+        value: state.rateInvalid ? state.rateText
+             : (state.rate_paise ? String(f.perMt(state.rate_paise)) : ''),
+        oninput: e => typeRate(e.target.value)
+      }),
+      h('span', { class: 'dim' }, '/MT')),
+    ui.rateErr = h('div', { class: 'rate-err' }, state.rateInvalid ? rateErrorText(state.rateText) : ''),
+    h('div', { class: 'chips', style: { marginTop: '14px' } },
+      ...[-50, -25, -10, 10, 25, 50].map(d =>
         h('button', { class: 'chip', onclick: () => bumpRate(d) },
-          (d > 0 ? '+' : '−') + '₹' + Math.abs(d / 100).toFixed(2)))));
+          (d > 0 ? '+' : '−') + '₹' + Math.abs(d * f.PER_MT).toLocaleString('en-IN')))),
+    h('div', { class: 'rate-extras' },
+      h('label', { class: 'gst-check' },
+        h('input', {
+          type: 'checkbox', checked: state.plus_gst || undefined,
+          onchange: e => { state.plus_gst = e.target.checked; }
+        }),
+        h('span', {}, 'GST extra'),
+        h('small', {}, 'rate excludes GST')),
+      h('label', { class: 'explace' },
+        h('span', {}, 'Ex-Place'),
+        h('input', {
+          class: 'ghost-input', data: { fkey: 'explace' }, value: state.ex_place,
+          placeholder: 'Mundra / Aslali / Other',
+          oninput: e => { state.ex_place = e.target.value; }
+        }))));
 }
 
-function bumpRate(d) { setRate(state.rate_paise + d); }
+// A per-MT figure is exact only in Rs 10 steps (1 paisa per kg). Anything finer
+// is refused and the book button locks, rather than storing a rounded number
+// the trader never typed.
+//
+// The refusal lives in state, not in the DOM. It used to be written straight
+// into the error element, so any re-render - a lot list arriving, the Sauda
+// number refreshing - rebuilt the box from the last good rate and blanked the
+// message, leaving a valid-looking figure beside a dead Book button.
+function rateErrorText(text) {
+  const lo = Math.floor(Number(text) / f.PER_MT) * f.PER_MT;
+  return `Rates go in steps of ₹10 per MT — ₹${lo.toLocaleString('en-IN')} or ` +
+         `₹${(lo + f.PER_MT).toLocaleString('en-IN')}?`;
+}
+
+function typeRate(raw) {
+  const text = String(raw).replace(/[^0-9.]/g, '');
+  if (!text) {
+    state.rateInvalid = false; state.rateText = '';
+    if (ui.rateErr) ui.rateErr.textContent = '';
+    return setRate(0, true);
+  }
+  const paise = f.fromPerMt(Number(text));
+  if (paise === null) {
+    state.rateInvalid = true; state.rateText = text;
+    if (ui.rateErr) ui.rateErr.textContent = rateErrorText(text);
+    return sync();
+  }
+  state.rateInvalid = false; state.rateText = '';
+  if (ui.rateErr) ui.rateErr.textContent = '';
+  setRate(paise, true);
+}
+
+function bumpRate(d) { state.rateInvalid = false; state.rateText = ''; setRate(state.rate_paise + d); }
 
 function setRate(paise, typing = false) {
   const before = state.rate_paise;
@@ -463,7 +643,7 @@ function setRate(paise, typing = false) {
   else {
     sync();
     // The dial mirrors the box; while he is in the box, leave the box alone.
-    if (typing && ui.rateDial) ui.rateDial.textContent = '₹' + (state.rate_paise / 100).toFixed(2);
+    if (typing && ui.rateDial) ui.rateDial.textContent = f.rate(state.rate_paise);
   }
 }
 
@@ -568,7 +748,7 @@ function paintRow(row, fl) {
   ref.barI.style.width = (lot.available_g ? Math.min(100, (take / lot.available_g) * 100) : 0) + '%';
   ref.margin.className = 'qmargin ' + (take ? pnlClass(row.marginRate) : 'dim');
   ref.marginB.textContent = take ? f.inr(row.margin, { sign: true }) : '';
-  ref.marginS.textContent = state.rate_paise ? f.rateDelta(row.marginRate) + '/kg' : '';
+  ref.marginS.textContent = state.rate_paise ? f.rateDelta(row.marginRate) + '/MT' : '';
   ref.rest.disabled = fl.left <= 0 || take >= lot.available_g;
   // Never write into the box he is typing in - that is the whole point.
   if (document.activeElement !== ref.input) {
@@ -593,7 +773,7 @@ function sync() {
     const want = state.qty_g ? String(Math.round(state.qty_g / 1000)) : '';
     if (ui.qtyBox.value !== want) ui.qtyBox.value = want;
   }
-  if (ui.rateDial) ui.rateDial.textContent = '₹' + (state.rate_paise / 100).toFixed(2);
+  if (ui.rateDial) ui.rateDial.textContent = f.rate(state.rate_paise);
 
   if (fl) {
     for (const row of fl.rows) paintRow(row, fl);
@@ -627,12 +807,24 @@ function blockTerms() {
       h('div', { class: 'field' }, h('label', {}, 'Payment'),
         h('input', { data: { fkey: 'pay' }, value: t.payment_terms, placeholder: '30 days',
           oninput: e => { t.payment_terms = e.target.value; } })),
+      h('div', { class: 'field' }, h('label', {}, 'Payment due'),
+        h('input', {
+          type: 'date', data: { fkey: 'due' }, value: state.payment_due || '',
+          oninput: e => { state.payment_due = e.target.value; }
+        }),
+        h('div', { class: 'due-chips' },
+          ...[['Today', 0], ['+7d', 7], ['+15d', 15], ['+30d', 30], ['+45d', 45]].map(([l, n]) =>
+            h('button', {
+              type: 'button', class: 'chip',
+              onclick: () => { state.payment_due = addDays(state.date, n); render(); }
+            }, l)))),
       h('div', { class: 'field' }, h('label', {}, 'E-way bill'),
         h('input', { data: { fkey: 'eway' }, value: t.eway, placeholder: 'ASL to buyer',
           oninput: e => { t.eway = e.target.value; } })),
       h('div', { class: 'field' }, h('label', {}, 'Deal date'),
         h('input', { type: 'date', data: { fkey: 'date' }, value: state.date,
-          oninput: e => { state.date = e.target.value; } })),
+          // a new date can cross 1 April, which changes the Sauda series
+          oninput: e => { state.date = e.target.value; refreshSauda(false); } })),
       h('div', { class: 'field', style: { gridColumn: '1/-1' } }, h('label', {}, 'Note'),
         h('input', { data: { fkey: 'remarks' }, value: t.remarks, placeholder: 'anything worth remembering',
           oninput: e => { t.remarks = e.target.value; } }))));
@@ -678,6 +870,7 @@ function paintBar(fl) {
 
 function lineText(fl, value) {
   if (state.error) return { text: state.error, err: true };
+  if (state.rateInvalid) return { text: 'Rate must be in steps of ₹10 per MT', err: true };
   if (!ready()) {
     const need = !state.party ? (state.side === 'buy' ? 'a supplier' : 'a buyer')
       : !state.line.material ? 'a material'
@@ -714,6 +907,11 @@ async function confirm() {
       qty_g: state.qty_g,
       rate_paise: state.rate_paise,
       deal_date: state.date,
+      sauda_no: (state.sauda_no || '').trim() || undefined,
+      warehouse: state.warehouse || undefined,
+      plus_gst: !!state.plus_gst,
+      payment_due: state.payment_due || undefined,
+      ex_place: (state.ex_place || '').trim() || undefined,
       pins: fl ? fl.rows.map(r => ({ lot_id: r.lot.id, qty_g: r.take })) : undefined,
       allow_short: false,
       transporter: state.terms.transporter || undefined,

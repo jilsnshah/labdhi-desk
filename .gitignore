@@ -5,3 +5,9 @@ data/*.db-shm
 __pycache__/
 *.pyc
 .DS_Store
+
+# Party ledgers: real customer names, addresses and GSTINs. The repo is public -
+# these must never be committed. Import them locally with backend/import_parties.py.
+*.xlsx
+*.xls
+*.csv

@@ -143,12 +143,56 @@ def connect() -> Conn:
     return conn
 
 
+# Columns added after the first production deploy. CREATE TABLE IF NOT EXISTS
+# never alters a table that already exists, so a live database would silently
+# lack them; these are added in place, once, on boot.
+MIGRATIONS = [
+    ("deals", "warehouse", "TEXT"),
+    ("deals", "payment_due", "TEXT"),
+    ("deals", "ex_place", "TEXT"),
+    ("lots", "warehouse", "TEXT"),
+    ("parties", "address", "TEXT"),
+    ("parties", "gstin", "TEXT"),
+    ("parties", "pan", "TEXT"),
+    ("warehouses", "location", "TEXT"),
+]
+
+
+def _has_column(conn, table: str, column: str) -> bool:
+    if conn.is_pg:
+        return bool(scalar(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_name = ? AND column_name = ?", (table, column)))
+    return any(r["name"] == column for r in conn.raw.execute("PRAGMA table_info(%s)" % table))
+
+
+def migrate(conn) -> None:
+    added = set()
+    for table, column, kind in MIGRATIONS:
+        if not _has_column(conn, table, column):
+            conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, kind))
+            added.add((table, column))
+    # Parties used to carry only a city. Carry it into the new address field the
+    # one time that field appears, so nobody's details vanish from the screen -
+    # and never again after that, so a deliberately cleared address stays clear.
+    if ("parties", "address") in added:
+        conn.execute("UPDATE parties SET address = city "
+                     "WHERE address IS NULL AND city IS NOT NULL AND city != ''")
+    # A party is unique by GSTIN. The index lives here, not in schema.sql: on an
+    # older database schema.sql runs before the column exists, and an index on a
+    # missing column would abort the whole boot. NULLs do not collide, so parties
+    # with no GSTIN are unaffected.
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_parties_gstin ON parties(gstin)")
+
+
 def init_db() -> None:
     conn = connect()
     with open(SCHEMA) as fh:
         conn.executescript(fh.read())
+    migrate(conn)
     defaults = {
         "company_name": "Labdhi Exim",
+        "sauda_prefix": "LE",       # LE/26-27/0001
         "alloc_policy": "fifo",
         "allow_short_sales": "0",   # a short must be an explicit choice, never a default
         "unit": "kg",
@@ -158,7 +202,7 @@ def init_db() -> None:
 
 
 TABLES = ["allocations", "lots", "deals", "marks", "events", "skus", "parties",
-          "catalog_makers", "catalog_grades", "catalog_materials", "settings"]
+          "catalog_makers", "catalog_grades", "catalog_materials", "warehouses", "settings"]
 
 
 def reset() -> None:
