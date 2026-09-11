@@ -46,6 +46,14 @@ def upgrade(conn) -> bool:
         schema = fh.read()
 
     with db.tx() as c:
+        # Two processes booting together (a deploy while someone runs the
+        # importer) must not both upgrade: the second would rename the new
+        # tables out of the way. Postgres serialises them on a lock held until
+        # commit, and the loser finds the book already current.
+        if c.is_pg:
+            c.execute("SELECT pg_advisory_xact_lock(724501)")
+            if not db.has_table(c, "skus"):
+                return False
         for table, column, kind in LEGACY_COLUMNS:
             if db.has_table(c, table) and not db.has_column(c, table, column):
                 c.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, kind))
