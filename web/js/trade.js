@@ -583,7 +583,7 @@ function lotRow(row, fl) {
       h('div', { class: 'qqty num' }, f.qty(lot.available_g))),
     h('div', { class: 'qwho' },
       h('b', {}, lot.supplier_name),
-      h('span', {}, `${lot.deal_ref} · ${f.date(lot.deal_date)} · ${f.qty(lot.available_g)} here`),
+      h('span', {}, `${lot.deal_ref} · ${f.date(lot.deal_date)}`),
       h('div', { class: 'qbarline' }, ref.barI)),
     ref.margin,
     h('div', { class: 'qtake' }, h('div', { class: 'qbox' }, ref.input, h('span', { class: 'qunit' }, 'kg')), ref.rest));

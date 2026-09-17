@@ -488,9 +488,7 @@ function stepSplit() {
           h('div', { class: 'mlot-qty num' }, f.qty(row.lot.available_g))),
         h('div', { class: 'mlot-main' },
           h('b', {}, row.lot.supplier_name),
-          h('span', {}, row.take
-            ? `${f.qty(row.take)} of ${f.qty(row.lot.available_g)} taken${lp >= 100 ? ' · full' : ''}`
-            : `${f.qty(row.lot.available_g)} free · ${row.lot.deal_ref} · ${f.date(row.lot.deal_date)}`)),
+          h('span', {}, `${row.lot.deal_ref} · ${f.date(row.lot.deal_date)}${lp >= 100 ? ' · full' : ''}`)),
         h('div', { class: 'mlot-take' },
           h('b', { class: 'num ' + (row.take ? '' : 'dim') }, row.take ? f.qty(row.take) : '—'),
           h('span', { class: row.marginRate >= 0 ? 'up' : 'down' }, f.rateDelta(row.marginRate) + '/kg')));
