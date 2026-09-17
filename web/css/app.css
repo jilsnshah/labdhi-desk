@@ -777,3 +777,8 @@ main{overflow:auto;padding:26px 24px 60px}
   .facts{grid-template-columns:1fr 1fr}
   .setup-tools{flex-wrap:wrap}
 }
+
+/* big lot quantity under the big rate, so both read at a glance */
+.qleft{display:flex;flex-direction:column;gap:2px}
+.qqty{font-size:22px;font-weight:700;letter-spacing:-.02em;color:var(--ink)}
+@media (max-width: 760px){ .qleft{grid-row:1;align-self:start} .qqty{font-size:18px} }

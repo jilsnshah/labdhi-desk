@@ -129,7 +129,7 @@ The same forms appear as a centred card on desktop and a bottom sheet on the pho
 | Desk | Positions per product with per-warehouse breakdown, P&L, alerts. Filters: warehouse, material, grade, manufacturer, bought-from. |
 | Stock | Warehouse cards; stock per product × warehouse; each row opens its lots (Move / Adjust) and its ledger with running balance; all movements. |
 | Flow | Lineage graph, purchases → sales. |
-| Tape | One row per sauda: Sauda No., Date, Type, Party, Product / Grade, Qty (MT), Rate (₹/MT), Warehouse, Status, Delivery, Margin. A row opens every recorded field and the lineage. |
+| Tape | One row per sauda: Sauda No., Date, Type, Party, Product / Grade, Qty (MT), Rate (₹/kg), Warehouse, Status, Delivery, Margin. A row opens every recorded field and the lineage. |
 | Setup | Parties, Products, Warehouses, Materials & grades, Manufacturers, States. |
 | Buy / Sell ticket | Party → product → warehouse → quantity → rate → (sale: which lots) → paperwork. |
 

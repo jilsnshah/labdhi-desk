@@ -73,7 +73,7 @@ Mahavir Pipes      → search or tap from the party list  (+ Add new party)
 PVC → S65 → Reliance   material, grade, manufacturer — only products you hold
 Mundra  12T        → dispatch from: only warehouses holding it (skipped if one)
 50% / All          → quantity, capped at what Mundra holds
-₹97,250            → rate per MT; the margin moves as you move it
+₹97.25            → rate per kg; the margin moves as you move it
 which lots         → type how much comes out of each lot in Mundra
 Book sale          → booked
 ```
@@ -86,11 +86,11 @@ sitting on, so the split is plain:
 
 ```
  WHICH STOCK GOES OUT OF MUNDRA                    ┌──────────────────┐
- ₹97,400  Shreeji Polymers  10 MT   +₹5,850/MT     │ LEFT TO ASSIGN   │
+ ₹97.40   Shreeji Polymers  10 MT   +₹5.85/kg      │ LEFT TO ASSIGN   │
                                     [  5000 ] kg   │     12 MT        │
- ₹99,100  Vora Polychem     12 MT   +₹4,150/MT     │    of 24 MT      │
+ ₹99.10   Vora Polychem     12 MT   +₹4.15/kg      │    of 24 MT      │
                                     [  7000 ] kg   │ ▓▓▓▓▓▓▓░░░░░░░░  │
- ₹1,00,000 Rajdhani Traders 18 MT   +₹3,250/MT     │  12 MT assigned  │
+ ₹100.00  Rajdhani Traders  18 MT   +₹3.25/kg      │  12 MT assigned  │
                                     [     0 ] kg   │    Clear all     │
                                        fill rest   └──────────────────┘
 ```
@@ -114,7 +114,7 @@ exactly one target: zero.
 | **Desk** `1` | Open P&L, realised today, and one card per product with its per-warehouse stock and the *lot ladder* — every lot as a segment, coloured cheap-green to dear-amber. |
 | **Stock** `2` | Warehouse cards; stock per product per warehouse; open a row for its lots (**Move**, **Adjust**) and its ledger with a running balance; every movement below. |
 | **Flow** `3` | The lineage graph. Purchases left, sales right, ribbons sized by quantity and coloured by margin. |
-| **Tape** `4` | Every sauda as a table row: Sauda No., Date, Type, Party, Product / Grade, Qty (MT), Rate (₹/MT), Warehouse, Status, Delivery, Margin. Open a row for every recorded field and the lineage. |
+| **Tape** `4` | Every sauda as a table row: Sauda No., Date, Type, Party, Product / Grade, Qty (MT), Rate (₹/kg), Warehouse, Status, Delivery, Margin. Open a row for every recorded field and the lineage. |
 | **Setup** `5` | Parties, Products, Warehouses, Materials & grades, Manufacturers, States — each searchable and paged. |
 | **Position** | Click a card: the ladder full-width, per-warehouse stock, then every lot with where it went. |
 
@@ -148,11 +148,11 @@ must never change under you because a lot was edited later.
 | stored as | unit | example |
 |---|---|---|
 | quantity | grams | 20,000 kg → `20_000_000` |
-| rate | paise per kg | ₹98,250/MT → `9825` |
+| rate | paise per kg | ₹98.25/kg → `9825` |
 | value | paise | ₹19,65,000 → `196_500_000` |
 
-No float ever reaches the database. Rates are shown per MT; one paisa per kg is
-₹10 per MT, so a per-MT figure that is not a multiple of ₹10 is refused rather
+No float ever reaches the database. Rates are shown and typed in ₹ per kg and
+parsed as text straight into integer paise; a figure with more than two decimals is refused rather
 than rounded.
 
 ### The invariant the tests defend
@@ -230,7 +230,7 @@ sales, with the purchases that fed them pulled in whatever their date.
 |---|---|
 | **Sauda No.** | `LE/26-27/0001` — one series for buys and sells, restarting each 1 April. The next number is one past the highest used that year. Editable; must be unique. The prefix is the `sauda_prefix` setting. |
 | **Warehouse** | A warehouse record. Buy: where it is received. Sell: where it is dispatched from, and the only place its lots can come from. |
-| **Rate** | Entered and shown **per MT**, stored as paise per kg; exact in ₹10 steps. |
+| **Rate** | Entered and shown **₹ per kg** (e.g. 98.25), stored as integer paise per kg; more than two decimals is refused, never rounded. |
 | **GST extra** | Checkbox, on by default. Recorded only. |
 | **Payment due** | A calendar date, with Today / +7 / +15 / +30 / +45 day shortcuts. |
 | **Ex-Place** | Free text — pricing basis, e.g. Mundra. |

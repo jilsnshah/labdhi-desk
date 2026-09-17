@@ -93,6 +93,7 @@ function go(delta) {
   ms.stepIndex = Math.max(0, Math.min(steps().length - 1, stepIndex() + delta));
   ms.entry = ''; ms.query = ''; ms.browse = null; ms.editingLot = null;
   ms.list = { items: [], total: 0 };
+  if (ms.scroll) ms.scroll = {};
   loadStep();
   paint();
   const body = screen && screen.querySelector('.mt-body');
@@ -224,6 +225,18 @@ function paint() {
   const fkey = active && active.dataset ? active.dataset.fkey : null;
   const caret = fkey ? active.selectionStart : null;
 
+  // Every key press repaints the screen. Two things keep that from throwing the
+  // trader back to the top: the numeric pad lives in its own zone outside the
+  // scrolling body, so it is always on screen whatever the phone's height, and
+  // the body's scroll position is remembered per screen and put back.
+  const key = step + ':' + (ms.editingLot || '') + ':' + (ms.browse || '');
+  const prev = screen.querySelector('.mt-body');
+  ms.scroll = ms.scroll || {};
+  if (prev && ms.paintedKey) ms.scroll[ms.paintedKey] = prev.scrollTop;
+
+  const nodes = [body(step)].flat(9).filter(Boolean);
+  const pad = nodes.find(n => n.classList && n.classList.contains('mpad'));
+
   mount(screen,
     h('div', { class: 'mt-head' },
       h('button', { class: 'mt-back', onclick: back }, '‹'),
@@ -232,8 +245,13 @@ function paint() {
         h('span', {}, crumbs())),
       h('button', { class: 'mt-back', onclick: () => closeTicket() }, '✕')),
     h('div', { class: 'mt-steps' }, ...steps().map((_, i) => h('i', { class: i <= stepIndex() ? 'done' : '' }))),
-    h('div', { class: 'mt-body' }, body(step)),
+    h('div', { class: 'mt-body' + (pad ? ' with-pad' : '') }, nodes.filter(n => n !== pad)),
+    pad ? h('div', { class: 'mt-padzone' }, pad) : null,
     foot(step));
+
+  const nb = screen.querySelector('.mt-body');
+  if (nb && ms.scroll[key]) nb.scrollTop = ms.scroll[key];
+  ms.paintedKey = key;
 
   if (fkey) {
     const el = screen.querySelector(`[data-fkey="${fkey}"]`);
@@ -398,14 +416,14 @@ function autoIfSingle() {
 // --------------------------------------------------------------- rate
 function stepRate() {
   const typedNow = ms.entry !== '';
-  const live = typedNow ? f.fromPerMt(Number(ms.entry)) : ms.rate_paise;
+  const live = typedNow ? f.fromPerKg(ms.entry) : ms.rate_paise;
   const bad = typedNow && live === null;
   const paise = live || 0;
   const cost = ms.side === 'sell' ? sellCost() : 0;
   const marginRate = cost && paise ? paise - cost : 0;
   const margin = valuePaise(ms.qty_g, marginRate);
   const good = marginRate >= 0;
-  const shown = typedNow ? Number(ms.entry || 0).toLocaleString('en-IN') : f.perMt(ms.rate_paise).toLocaleString('en-IN');
+  const shown = typedNow ? (ms.entry || '0') : f.perKg(ms.rate_paise);
   return [
     h('div', { class: 'mt-q' }, ms.side === 'sell' ? 'At what rate?' : 'At what cost?'),
     h('div', { class: 'mt-hint' }, `${f.qty(ms.qty_g)} · ${ms.product.display}`),
@@ -413,22 +431,22 @@ function stepRate() {
       ? h('div', { class: 'mlive ' + (paise ? (good ? 'good' : 'bad') : '') },
           h('div', { class: 'mlive-top' },
             h('b', { class: 'num ' + (good ? 'up' : 'down') }, f.inr(margin, { sign: true })),
-            h('span', { class: 'num ' + (good ? 'up' : 'down') }, f.rateDelta(marginRate) + '/MT')),
-          h('div', { class: 'mlive-sub' }, `your cost ${f.rate(cost)}/MT · sale value ${f.inr(valuePaise(ms.qty_g, paise))}`))
+            h('span', { class: 'num ' + (good ? 'up' : 'down') }, f.rateDelta(marginRate) + '/kg')),
+          h('div', { class: 'mlive-sub' }, `your cost ${f.rate(cost)}/kg · sale value ${f.inr(valuePaise(ms.qty_g, paise))}`))
       : (paise ? h('div', { class: 'mlive' },
           h('div', { class: 'mlive-top' }, h('b', { class: 'num' }, f.inr(valuePaise(ms.qty_g, paise)))),
           h('div', { class: 'mlive-sub' }, 'total value of this purchase')) : null),
     h('div', { class: 'mnum-value' + (bad ? ' warn' : '') },
       h('b', {}, '₹' + shown),
-      h('small', {}, bad ? 'Rates go in steps of ₹10 per MT' : 'per MT, basic rate')),
+      h('small', {}, bad ? 'At most 2 decimals — e.g. 98.25' : 'per kg, basic rate')),
     h('div', { class: 'mchips g3' },
       ...[-50, -25, -10, 10, 25, 50].map(d => h('button', {
         class: 'mchip',
         onclick: () => { const base = typedNow && live !== null ? live : ms.rate_paise; ms.rate_paise = Math.max(0, base + d); ms.entry = ''; paint(); }
-      }, (d > 0 ? '+' : '−') + '₹' + Math.abs(d * f.PER_MT).toLocaleString('en-IN')))),
+      }, f.rateDelta(d)))),
     h('button', { class: 'mgst' + (ms.plus_gst ? ' on' : ''), onclick: () => { ms.plus_gst = !ms.plus_gst; paint(); } },
       ms.plus_gst ? '✓ GST extra — rate excludes GST' : 'GST included in this rate'),
-    numpad({ noDot: true })
+    numpad()
   ];
 }
 
@@ -465,7 +483,9 @@ function stepSplit() {
         style: { '--fill': lp + '%' },
         onclick: () => { ms.editingLot = row.lot.id; ms.entry = ''; paint(); }
       },
-        h('div', { class: 'mlot-rate num' }, f.rate(row.lot.rate_paise)),
+        h('div', { class: 'mlot-left' },
+          h('div', { class: 'mlot-rate num' }, f.rate(row.lot.rate_paise)),
+          h('div', { class: 'mlot-qty num' }, f.qty(row.lot.available_g))),
         h('div', { class: 'mlot-main' },
           h('b', {}, row.lot.supplier_name),
           h('span', {}, row.take
@@ -473,7 +493,7 @@ function stepSplit() {
             : `${f.qty(row.lot.available_g)} free · ${row.lot.deal_ref} · ${f.date(row.lot.deal_date)}`)),
         h('div', { class: 'mlot-take' },
           h('b', { class: 'num ' + (row.take ? '' : 'dim') }, row.take ? f.qty(row.take) : '—'),
-          h('span', { class: row.marginRate >= 0 ? 'up' : 'down' }, f.rateDelta(row.marginRate) + '/MT')));
+          h('span', { class: row.marginRate >= 0 ? 'up' : 'down' }, f.rateDelta(row.marginRate) + '/kg')));
     })
   ];
 }
@@ -530,7 +550,7 @@ function stepReview() {
       row('Product', ms.product.display, () => jump('what')),
       row(sell ? 'Dispatch from' : 'Receive into', ms.warehouse.name, () => jump('where')),
       row('Quantity', f.qty(ms.qty_g), () => jump('qty')),
-      row('Rate', f.rate(ms.rate_paise) + '/MT', () => jump('rate')),
+      row('Rate', f.rate(ms.rate_paise) + '/kg', () => jump('rate')),
       row('GST', ms.plus_gst ? 'Extra' : 'Included', () => { ms.plus_gst = !ms.plus_gst; paint(); }),
       row('Value', f.inr(valuePaise(ms.qty_g, ms.rate_paise))),
       row('Date', f.date(ms.date), openTerms),
@@ -540,8 +560,8 @@ function stepReview() {
       ? h('div', { class: 'mlive ' + (margin >= 0 ? 'good' : 'bad') },
           h('div', { class: 'mlive-top' },
             h('b', { class: 'num ' + (margin >= 0 ? 'up' : 'down') }, f.inr(margin, { sign: true })),
-            h('span', { class: 'num ' + (margin >= 0 ? 'up' : 'down') }, f.rateDelta(marginRate) + '/MT')),
-          h('div', { class: 'mlive-sub' }, `bought at ${f.rate(cost)}/MT, selling at ${f.rate(ms.rate_paise)}/MT`))
+            h('span', { class: 'num ' + (margin >= 0 ? 'up' : 'down') }, f.rateDelta(marginRate) + '/kg')),
+          h('div', { class: 'mlive-sub' }, `bought at ${f.rate(cost)}/kg, selling at ${f.rate(ms.rate_paise)}/kg`))
       : null,
     ms.error ? h('div', { class: 'need' }, ms.error) : null
   ];
@@ -656,7 +676,7 @@ function foot(step) {
   }
   const value = step === 'qty'
     ? (ms.entry !== '' ? Math.round(parseFloat(ms.entry || '0') * MT) : ms.qty_g)
-    : (ms.entry !== '' ? f.fromPerMt(Number(ms.entry)) : ms.rate_paise);
+    : (ms.entry !== '' ? f.fromPerKg(ms.entry) : ms.rate_paise);
   return h('div', { class: 'mt-foot' },
     h('button', { class: 'mt-next', disabled: !(value > 0), onclick: () => {
       if (step === 'qty') {

@@ -35,7 +35,7 @@ export function renderStock(root, ctx) {
   const list = pagedList({
     pageSize: 25, className: 'stock',
     head: ['Product', 'Warehouse', { label: 'In stock (MT)', cls: 'r' }, { label: 'Lots', cls: 'r' },
-           { label: 'Avg cost (₹/MT)', cls: 'r' }, { label: 'Value', cls: 'r' }, { label: 'Mark (₹/MT)', cls: 'r' }],
+           { label: 'Avg cost (₹/kg)', cls: 'r' }, { label: 'Value', cls: 'r' }, { label: 'Mark (₹/kg)', cls: 'r' }],
     load: p => api.stock(p),
     row: r => stockRow(r, afterMove),
     onPage: count.update,
@@ -87,9 +87,9 @@ function stockRow(r, after) {
     h('td', {}, r.warehouse),
     h('td', { class: 'r mono strong' }, f.mt(r.stock_g)),
     h('td', { class: 'r mono' }, r.lots),
-    h('td', { class: 'r mono' }, f.perMt(r.cost_paise).toLocaleString('en-IN')),
+    h('td', { class: 'r mono' }, f.perKg(r.cost_paise)),
     h('td', { class: 'r mono' }, f.inr(r.stock_value_paise, { compact: true })),
-    h('td', { class: 'r mono' }, r.mark_paise ? f.perMt(r.mark_paise).toLocaleString('en-IN') : '—'));
+    h('td', { class: 'r mono' }, r.mark_paise ? f.perKg(r.mark_paise) : '—'));
   tr.addEventListener('click', async () => {
     if (open) { open.remove(); open = null; tr.classList.remove('open'); return; }
     open = h('tr', { class: 'deal-detail' }, h('td', { colspan: 7 }, await stockDetail(r, after)));
@@ -113,12 +113,12 @@ export async function stockDetail(r, after) {
   return h('div', { class: 'detail' },
     h('div', { class: 'lineage-title' }, `${r.product} in ${r.warehouse}`),
     h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl lots' },
-      h('thead', {}, h('tr', {}, ...['Purchase', 'Supplier', 'Date', 'Cost (₹/MT)', 'Bought', 'Left', ''].map(c => h('th', {}, c)))),
+      h('thead', {}, h('tr', {}, ...['Purchase', 'Supplier', 'Date', 'Cost (₹/kg)', 'Bought', 'Left', ''].map(c => h('th', {}, c)))),
       h('tbody', {}, ...lots.map(l => h('tr', {},
         h('td', { class: 'mono' }, l.deal_ref, l.parent_lot_id ? h('small', {}, 'moved in') : null),
         h('td', {}, l.supplier_name),
         h('td', {}, f.date(l.deal_date)),
-        h('td', { class: 'mono' }, f.perMt(l.rate_paise).toLocaleString('en-IN')),
+        h('td', { class: 'mono' }, f.perKg(l.rate_paise)),
         h('td', { class: 'mono' }, f.mt(l.qty_g)),
         h('td', { class: 'mono strong' }, f.mt(l.available_g)),
         h('td', {}, lotActions({ ...l, product: r.product }, after))))))),

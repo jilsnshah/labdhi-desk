@@ -270,7 +270,7 @@ function dealCard(d, reload) {
     h('div', { class: 'mdeal-product' }, `${d.material} ${d.grade}`, h('small', {}, ` · ${d.manufacturer}`)),
     h('div', { class: 'mdeal-grid' },
       cell('Qty (MT)', f.mt(d.qty_g)),
-      cell('Rate (₹/MT)', f.perMt(d.rate_paise).toLocaleString('en-IN')),
+      cell('Rate (₹/kg)', f.perKg(d.rate_paise)),
       cell('Warehouse', d.warehouse),
       cell('Delivery', d.delivery_by)),
     sell ? h('div', { class: 'mdeal-margin ' + (d.margin_paise >= 0 ? 'up' : 'down') },

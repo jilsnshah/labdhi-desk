@@ -10,7 +10,7 @@ import { showNode } from './flow.js';
 import { transferForm, adjustForm } from './forms.js';
 
 const COLUMNS = ['Sauda No.', 'Date', 'Type', 'Party', 'Product / Grade',
-  { label: 'Qty (MT)', cls: 'r' }, { label: 'Rate (₹/MT)', cls: 'r' }, 'Warehouse', 'Status', 'Delivery',
+  { label: 'Qty (MT)', cls: 'r' }, { label: 'Rate (₹/kg)', cls: 'r' }, 'Warehouse', 'Status', 'Delivery',
   { label: 'Margin', cls: 'r' }];
 
 export async function renderTape(root, ctx) {
@@ -83,7 +83,7 @@ function dealRow(d, ctx, reload) {
     h('td', { class: 'party' }, h('b', {}, d.party_name), d.party_gstin ? h('small', {}, d.party_gstin) : null),
     h('td', { class: 'product' }, h('b', {}, `${d.material} ${d.grade}`), h('small', {}, d.manufacturer)),
     h('td', { class: 'r mono' }, f.mt(d.qty_g)),
-    h('td', { class: 'r mono' }, f.perMt(d.rate_paise).toLocaleString('en-IN')),
+    h('td', { class: 'r mono' }, f.perKg(d.rate_paise)),
     h('td', {}, d.warehouse || h('span', { class: 'dim' }, 'two warehouses')),
     h('td', {}, h('span', { class: 'pill ' + d.status }, f.statusLabel(d.status))),
     h('td', {}, d.delivery_by || h('span', { class: 'dim' }, '—')),
@@ -116,7 +116,7 @@ export function dealDetail(deal, ctx, reload) {
       fact('Product', deal.product),
       fact(sell ? 'Dispatch from' : 'Received into', deal.warehouse),
       fact('Quantity', f.qty(deal.qty_g)),
-      fact('Rate', `${f.rate(deal.rate_paise)}/MT`),
+      fact('Rate', `${f.rate(deal.rate_paise)}/kg`),
       fact('GST', deal.plus_gst ? 'Extra' : 'Included in rate'),
       fact('Value', f.inr(deal.value_paise)),
       fact('Payment due', deal.payment_due ? f.date(deal.payment_due) : null),
@@ -183,10 +183,10 @@ export async function renderPosition(root, productId, ctx) {
       stat('In stock', f.qty(p.stock_g), `${open.length} open lots · ${p.warehouses.length} warehouse${p.warehouses.length === 1 ? '' : 's'}`, 'var(--ink)'),
       stat('Weighted cost', f.rate(p.cost_paise), f.inr(p.stock_value_paise, { compact: true }) + ' tied up', 'var(--ink)'),
       stat('Mark', p.mark_paise ? f.rate(p.mark_paise) : '—', p.mark_source || 'tap to set', 'var(--accent)', async () => {
-        const v = prompt('Current market rate, ₹ per MT', p.mark_paise ? String(f.perMt(p.mark_paise)) : '');
+        const v = prompt('Current market rate, ₹ per kg', p.mark_paise ? f.perKgPlain(p.mark_paise) : '');
         if (!v) return;
-        const paise = f.fromPerMt(Number(String(v).replace(/[^0-9.]/g, '')));
-        if (paise === null) { toast('Rates go in steps of ₹10 per MT', { kind: 'err' }); return; }
+        const paise = f.fromPerKg(String(v).replace(/[^0-9.]/g, ''));
+        if (paise === null) { toast('Rates go to at most 2 decimals — e.g. ₹98.25', { kind: 'err' }); return; }
         await api.setMark(productId, paise); again();
       }),
       stat('Open P&L', f.inr(p.unrealised_paise, { sign: true, compact: true }),

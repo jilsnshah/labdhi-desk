@@ -28,22 +28,24 @@ export function inr(paise, opts = {}) {
   });
 }
 
-// Rates are stored as paise per kg and shown per MT, the way the trade quotes
-// them: 9825 paise/kg is Rs 98,250/MT. One paisa per kg is Rs 10 per MT, so a
-// per-MT figure is exact in Rs 10 steps and nothing finer.
-export const PER_MT = 10;                         // Rs per MT for 1 paisa per kg
-export const perMt = p => Math.round((p || 0) * PER_MT);
-export const rate = p => '₹' + perMt(p).toLocaleString('en-IN');
-export const rateDelta = p =>
-  (p >= 0 ? '+' : '−') + '₹' + Math.abs(perMt(p)).toLocaleString('en-IN');
+// Rates are stored as integer paise per kg and shown as rupees per kg, the
+// way they are quoted: 9825 paise/kg is ₹98.25/kg. Only the display and the
+// input change; every calculation stays on the integer paise.
+const kgFmt = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
+export const perKg = p => ((p || 0) / 100).toLocaleString('en-IN', kgFmt);
+export const rate = p => '₹' + perKg(p);
+export const rateDelta = p => (p >= 0 ? '+' : '−') + '₹' + perKg(Math.abs(p || 0));
+// the bare figure for an input box: 98.25, 98.5, 98
+export const perKgPlain = p => String((p || 0) / 100);
 
-// Rs per MT typed by the trader -> paise per kg, or null when it cannot be held
-// exactly. A figure that would have to be rounded is refused, never adjusted.
-export function fromPerMt(rupees) {
-  const r = Number(rupees);
-  if (!isFinite(r) || r < 0) return null;
-  if (Math.round(r) !== r || r % PER_MT !== 0) return null;
-  return r / PER_MT;
+// ₹ per kg typed by the trader -> integer paise per kg, or null when it cannot
+// be held exactly (more than two decimals, or not a number). A figure that
+// would have to be rounded is refused, never adjusted. Parsed as text, so no
+// floating-point step can turn 98.29 into 9828.
+export function fromPerKg(text) {
+  const m = /^(\d*)(?:\.(\d{0,2}))?$/.exec(String(text ?? '').trim());
+  if (!m || (m[1] === '' && !m[2])) return null;
+  return Number(m[1] || 0) * 100 + Number(((m[2] || '') + '00').slice(0, 2));
 }
 
 export function date(iso) {

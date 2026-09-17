@@ -447,25 +447,25 @@ function blockRate() {
   const done = state.rate_paise > 0;
   const pos = state.position;
   const hint = sellSide()
-    ? (pos && pos.cost_paise ? `your average cost is ${f.rate(pos.cost_paise)}/MT` : null)
-    : (pos && pos.mark_paise ? `last sold at ${f.rate(pos.mark_paise)}/MT` : null);
+    ? (pos && pos.cost_paise ? `your average cost is ${f.rate(pos.cost_paise)}/kg` : null)
+    : (pos && pos.mark_paise ? `last sold at ${f.rate(pos.mark_paise)}/kg` : null);
   return h('div', { class: 'block' + (state.qty_g ? '' : ' pending') },
-    label('Rate  (₹ per MT)', done, hint),
+    label('Rate  (₹ per kg)', done, hint),
     h('div', { class: 'dial' },
       h('button', { class: 'step', onclick: () => bumpRate(-10) }, '−'),
       ui.rateDial = h('div', { class: 'dial-value num' }, f.rate(state.rate_paise)),
       h('button', { class: 'step', onclick: () => bumpRate(10) }, '+'),
       h('input', {
-        class: 'ghost-input num', data: { fkey: 'rate' }, placeholder: '98250',
-        value: state.rateInvalid ? state.rateText : (state.rate_paise ? String(f.perMt(state.rate_paise)) : ''),
+        class: 'ghost-input num', data: { fkey: 'rate' }, placeholder: '98.25', inputmode: 'decimal',
+        value: state.rateInvalid ? state.rateText : (state.rate_paise ? f.perKgPlain(state.rate_paise) : ''),
         oninput: e => typeRate(e.target.value)
       }),
-      h('span', { class: 'dim' }, '/MT')),
+      h('span', { class: 'dim' }, '/kg')),
     ui.rateErr = h('div', { class: 'rate-err' }, state.rateInvalid ? rateErrorText(state.rateText) : ''),
     h('div', { class: 'chips', style: { marginTop: '14px' } },
       ...[-50, -25, -10, 10, 25, 50].map(d =>
         h('button', { class: 'chip', onclick: () => bumpRate(d) },
-          (d > 0 ? '+' : '−') + '₹' + Math.abs(d * f.PER_MT).toLocaleString('en-IN')))),
+          f.rateDelta(d)))),
     h('div', { class: 'rate-extras' },
       h('label', { class: 'gst-check' },
         h('input', { type: 'checkbox', checked: state.plus_gst || undefined,
@@ -481,8 +481,8 @@ function blockRate() {
 // the book button locks - and the refusal lives in state, so a re-render can
 // never wipe it and leave a valid-looking figure beside a dead button.
 function rateErrorText(text) {
-  const lo = Math.floor(Number(text) / f.PER_MT) * f.PER_MT;
-  return `Rates go in steps of ₹10 per MT — ₹${lo.toLocaleString('en-IN')} or ₹${(lo + f.PER_MT).toLocaleString('en-IN')}?`;
+  const lo = Math.floor(Number(text) * 100) / 100;
+  return isFinite(lo) ? `Rates go to at most 2 decimals — ₹${lo.toFixed(2)}?` : 'Type the rate in ₹ per kg, e.g. 98.25';
 }
 
 function typeRate(raw) {
@@ -492,7 +492,7 @@ function typeRate(raw) {
     if (ui.rateErr) ui.rateErr.textContent = '';
     return setRate(0, true);
   }
-  const paise = f.fromPerMt(Number(text));
+  const paise = f.fromPerKg(text);
   if (paise === null) {
     state.rateInvalid = true; state.rateText = text;
     if (ui.rateErr) ui.rateErr.textContent = rateErrorText(text);
@@ -578,7 +578,9 @@ function lotRow(row, fl) {
   });
   ref.rest = h('button', { class: 'qrest', onclick: () => fillRest(lot) }, 'fill rest');
   ref.el = h('div', { class: 'qrow', style: { '--tint': tint } },
-    h('div', { class: 'qrate num', style: { color: tint } }, f.rate(lot.rate_paise)),
+    h('div', { class: 'qleft' },
+      h('div', { class: 'qrate num', style: { color: tint } }, f.rate(lot.rate_paise)),
+      h('div', { class: 'qqty num' }, f.qty(lot.available_g))),
     h('div', { class: 'qwho' },
       h('b', {}, lot.supplier_name),
       h('span', {}, `${lot.deal_ref} · ${f.date(lot.deal_date)} · ${f.qty(lot.available_g)} here`),
@@ -598,7 +600,7 @@ function paintRow(row, fl) {
   ref.barI.style.width = (lot.available_g ? Math.min(100, (take / lot.available_g) * 100) : 0) + '%';
   ref.margin.className = 'qmargin ' + (take ? pnlClass(row.marginRate) : 'dim');
   ref.marginB.textContent = take ? f.inr(row.margin, { sign: true }) : '';
-  ref.marginS.textContent = state.rate_paise ? f.rateDelta(row.marginRate) + '/MT' : '';
+  ref.marginS.textContent = state.rate_paise ? f.rateDelta(row.marginRate) + '/kg' : '';
   ref.rest.disabled = fl.left <= 0 || take >= lot.available_g;
   if (document.activeElement !== ref.input) {
     const shown = state.allocText[lot.id] !== undefined ? state.allocText[lot.id]
@@ -701,7 +703,7 @@ function paintBar(fl) {
 
 function lineText(fl, value) {
   if (state.error) return { text: state.error, err: true };
-  if (state.rateInvalid) return { text: 'Rate must be in steps of ₹10 per MT', err: true };
+  if (state.rateInvalid) return { text: 'Rate goes to at most 2 decimals (₹ per kg)', err: true };
   if (!ready()) {
     const need = !state.party ? (sellSide() ? 'a buyer' : 'a supplier')
       : !state.product ? 'a product'
