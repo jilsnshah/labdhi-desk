@@ -1,0 +1,137 @@
+// Send a sauda to the party on WhatsApp.
+//
+// The deal says who it is with (party_id); the party record holds the phone.
+// Nothing is copied onto the deal - the number is read from the party when the
+// message is sent, and a number typed here is saved to the party itself.
+//
+// On a phone WhatsApp is opened through its own URL scheme (whatsapp://send),
+// which hands straight to the app. On iOS that is the only reliable route: the
+// wa.me web link, opened from script, lands on a web page instead of the app.
+// Safari may ask "Open in WhatsApp?" first, and a browser can refuse to open an
+// app without a tap, so the card with a Send button always stays on screen.
+import { h, toast } from './ui.js';
+import { api } from './api.js';
+
+const isPhone = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+// "+91 98250 00000 / 079 2656 1234" -> "919825000000". The first number on
+// the line is taken; a 10-digit Indian mobile gets the 91 country code.
+export function waPhone(raw) {
+  const first = String(raw || '').split(/[\/,;|]| or /i).map(s => s.replace(/\D/g, '')).find(d => d.length >= 10);
+  if (!first) return null;
+  let d = first.replace(/^0+/, '');
+  if (d.length === 10) d = '91' + d;
+  return d.length >= 11 && d.length <= 15 ? d : null;
+}
+
+const longDate = iso => {
+  if (!iso) return '';
+  const d = new Date(iso + 'T00:00:00');
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+const paidBy = who => (who ? `paid by ${String(who).toLowerCase()}` : '');
+
+// Every field of the sauda, one per line, in the order a trader reads it.
+// Fields with nothing recorded keep their line, left blank.
+export function saudaMessage(deal, company) {
+  const sell = deal.side === 'sell';
+  const rate = (deal.rate_paise / 100).toFixed(2) + (deal.plus_gst ? '+' : ' (incl. GST)');
+  const payment = [deal.payment_terms, deal.payment_due ? `due ${longDate(deal.payment_due)}` : '']
+    .filter(Boolean).join(', ');
+  const lines = [
+    ['Sauda No', deal.ref],
+    ['Date', longDate(deal.deal_date)],
+    ['Seller', sell ? company : deal.party_name],
+    ['Buyer', sell ? deal.party_name : company],
+    ['Material', deal.product],
+    ['Weight', `${Math.round(deal.qty_g / 1000).toLocaleString('en-IN')} kg`],
+    ['Rate', `${rate} per kg`],
+    ['Delivery', paidBy(deal.delivery_by)],
+    ['Freight', paidBy(deal.freight_by)],
+    ['Payment', payment],
+    ['Transport', deal.transporter_name || ''],
+    ['Eway', deal.eway || ''],
+    [sell ? 'Dispatch from' : 'Delivery at', deal.warehouse || ''],
+    ['Ex-Place', deal.ex_place || ''],
+    ['Note', deal.remarks || '']
+  ];
+  return ['Sauda update', ...lines.map(([k, v]) => `${k} : ${v ?? ''}`)].join('\n');
+}
+
+export function openWhatsApp(phone, text) {
+  const q = `text=${encodeURIComponent(text)}`;
+  if (isPhone()) {
+    window.location.href = phone ? `whatsapp://send?phone=${phone}&${q}` : `whatsapp://send?${q}`;
+  } else {
+    window.open(phone ? `https://wa.me/${phone}?${q}` : `https://wa.me/?${q}`, '_blank', 'noopener');
+  }
+}
+
+// The card shown after booking (auto = try to open WhatsApp straight away),
+// and from any deal in the tape.
+export async function sendSauda(deal, company, { auto = false, booked = auto } = {}) {
+  let party = null;
+  try { party = await api.party(deal.party_id); } catch (_) { /* send without a number */ }
+  const text = saudaMessage(deal, company || 'Labdhi Exim');
+  let phone = party ? waPhone(party.phone) : null;
+
+  const numberInput = h('input', {
+    class: 'fld-input', type: 'tel', inputmode: 'tel', placeholder: '98250 00000',
+    value: party && party.phone ? party.phone : ''
+  });
+  const numberRow = h('div', { class: 'fld', hidden: !!phone },
+    h('label', { class: 'fld-label' }, `WhatsApp number for ${deal.party_name}`),
+    numberInput,
+    h('div', { class: 'fld-hint' }, 'Saved to the party, so next time it opens straight away.'));
+  const sub = h('div', { class: 'modal-sub' }, '');
+  const paintSub = () => {
+    sub.textContent = phone ? `to ${deal.party_name} · +${phone}` : `${deal.party_name} has no WhatsApp number saved`;
+  };
+  paintSub();
+
+  async function send() {
+    if (!phone) {
+      const typed = waPhone(numberInput.value);
+      if (!typed) { toast('Enter a 10-digit mobile number', { kind: 'err' }); numberInput.focus(); return; }
+      phone = typed;
+      if (party) {
+        try {
+          await api.partySave({ id: party.id, name: party.name, phone: numberInput.value.trim(),
+                                address: party.address || '', gstin: party.gstin || '',
+                                pan: party.pan || '', state_code: party.state_code || '' });
+        } catch (err) { toast(`Number not saved to party: ${err.message}`, { kind: 'err', ms: 8000 }); }
+      }
+      numberRow.hidden = true;
+      paintSub();
+    }
+    openWhatsApp(phone, text);
+  }
+
+  async function copy() {
+    try { await navigator.clipboard.writeText(text); toast('Sauda message copied'); }
+    catch (_) {
+      const area = h('textarea', {}); area.value = text; document.body.appendChild(area);
+      area.select(); document.execCommand('copy'); area.remove(); toast('Sauda message copied');
+    }
+  }
+
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  const card = h('div', { class: 'modal-card wa-card' },
+    h('div', { class: 'modal-head' },
+      h('div', {}, h('div', { class: 'modal-title' }, booked ? `${deal.ref} booked` : `Send ${deal.ref}`), sub),
+      h('button', { type: 'button', class: 'modal-x', onclick: close }, '×')),
+    h('pre', { class: 'wa-msg' }, text),
+    numberRow,
+    h('div', { class: 'wa-actions' },
+      h('button', { type: 'button', class: 'wa-send', onclick: send }, 'Send on WhatsApp'),
+      h('button', { type: 'button', class: 'form-cancel', onclick: copy }, 'Copy'),
+      h('button', { type: 'button', class: 'form-cancel', onclick: close }, 'Done')));
+  const overlay = h('div', { class: 'modal', onmousedown: e => { if (e.target === overlay) close(); } }, card);
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(overlay);
+
+  if (auto && phone && isPhone()) openWhatsApp(phone, text);
+}
+

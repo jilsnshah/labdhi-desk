@@ -12,6 +12,7 @@ import { pagedList } from './lists.js';
 import { partyForm, productForm, warehouseForm, transferForm, adjustForm, partySub } from './forms.js';
 import { removeRecord, nameForm } from './setup.js';
 import { MOVE_LABEL } from './stock.js';
+import { sendSauda } from './whatsapp.js';
 
 let ctx = null;
 
@@ -305,6 +306,10 @@ function dealCard(d, reload) {
         { qty: full.qty_g, short: `${full.party_name} · ${f.qty(full.qty_g)}` },
         { targetColor: sell ? 'var(--up)' : 'var(--accent)' }) : h('div', { class: 'mflow-empty' },
           sell ? 'Nothing allocated.' : 'None of this purchase sold yet.'),
+      full.status === 'booked' ? h('button', {
+        class: 'mmore wa', style: { marginTop: '10px' },
+        onclick: () => sendSauda(full, (ctx.boot && ctx.boot.settings && ctx.boot.settings.company_name))
+      }, 'Send on WhatsApp') : null,
       full.status === 'booked' ? h('button', {
         class: 'mmore', style: { marginTop: '10px' },
         onclick: async () => {

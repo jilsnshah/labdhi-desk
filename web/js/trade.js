@@ -14,6 +14,7 @@ import { h, mount, toast, celebrate, costTint, pnlClass, debounce } from './ui.j
 import * as f from './fmt.js';
 import { api } from './api.js';
 import { partyForm, productForm, warehouseForm, pickParty, partySub } from './forms.js';
+import { sendSauda } from './whatsapp.js';
 
 const MT = 1e6;
 const rnd = n => (n < 0 ? -Math.round(-n) : Math.round(n));
@@ -756,6 +757,7 @@ async function confirm() {
     state = null;
     ctx.go('desk');
     ctx.refresh();
+    sendSauda(deal, (ctx.boot && ctx.boot.settings && ctx.boot.settings.company_name), { auto: true });
   } catch (err) {
     state.busy = false; state.error = err.message; render();
   }

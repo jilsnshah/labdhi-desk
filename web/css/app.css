@@ -782,3 +782,16 @@ main{overflow:auto;padding:26px 24px 60px}
 .qleft{display:flex;flex-direction:column;gap:2px}
 .qqty{font-size:22px;font-weight:700;letter-spacing:-.02em;color:var(--ink)}
 @media (max-width: 760px){ .qleft{grid-row:1;align-self:start} .qqty{font-size:18px} }
+
+/* ---- sauda on WhatsApp */
+.wa-card{width:min(520px,100%)}
+.wa-msg{margin:0;padding:14px 16px;background:#e7f7ec;border:1px solid #c5e9d0;border-radius:12px;
+  font:14.5px/1.55 var(--sans);white-space:pre-wrap;word-break:break-word;max-height:46vh;overflow-y:auto;color:var(--ink)}
+.wa-actions{display:flex;gap:10px;flex-wrap:wrap}
+.wa-send{flex:1 1 100%;padding:15px;border-radius:12px;background:#25d366;color:#fff;font-weight:750;font-size:17px}
+.wa-send:active{filter:brightness(.94)}
+.wa-actions .form-cancel{flex:1}
+.chip.wa{border-color:#25d366;color:#128c4a}
+.mmore.wa{border-color:#25d366;color:#128c4a;font-weight:700}
+/* while the WhatsApp card is up, notices move to the top so they never cover Send */
+body:has(.wa-card) #toasts{top:calc(12px + env(safe-area-inset-top,0px));bottom:auto}

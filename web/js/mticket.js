@@ -12,6 +12,7 @@ import { h, mount, toast, debounce } from './ui.js';
 import * as f from './fmt.js';
 import { api } from './api.js';
 import { openForm, partyForm, productForm, warehouseForm, pickParty, partySub } from './forms.js';
+import { sendSauda } from './whatsapp.js';
 
 const MT = 1e6;
 const rnd = n => (n < 0 ? -Math.round(-n) : Math.round(n));
@@ -719,6 +720,7 @@ async function book() {
                : `Bought ${f.qty(deal.qty_g)} from ${deal.party_name} into ${deal.warehouse}`,
       { action: async () => { await api.undo(); toast('Reversed'); ctx.refresh(); } });
     ctx.refresh();
+    sendSauda(deal, (ctx.boot && ctx.boot.settings && ctx.boot.settings.company_name), { auto: true });
   } catch (err) {
     ms.busy = false; ms.error = err.message; paint();
   }

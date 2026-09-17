@@ -8,6 +8,7 @@ import { makeFilters } from './filters.js';
 import { pagedList, counter } from './lists.js';
 import { showNode } from './flow.js';
 import { transferForm, adjustForm } from './forms.js';
+import { sendSauda } from './whatsapp.js';
 
 const COLUMNS = ['Sauda No.', 'Date', 'Type', 'Party', 'Product / Grade',
   { label: 'Qty (MT)', cls: 'r' }, { label: 'Rate (₹/kg)', cls: 'r' }, 'Warehouse', 'Status', 'Delivery',
@@ -153,6 +154,8 @@ export function dealDetail(deal, ctx, reload) {
           catch (err) { toast(err.message, { kind: 'err', ms: 9000 }); }
         }
       }, '✕ Cancel deal') : null,
+      deal.status === 'booked' ? h('button', { class: 'chip wa', onclick: e => { e.stopPropagation(); sendSauda(deal, (ctx.boot && ctx.boot.settings && ctx.boot.settings.company_name)); } },
+        'Send on WhatsApp') : null,
       h('button', { class: 'chip', onclick: e => { e.stopPropagation(); ctx.openPosition(deal.product_id); } },
         'Open product'),
       h('button', {
