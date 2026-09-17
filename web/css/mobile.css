@@ -531,3 +531,19 @@ body.phone .more-count { font-size: 12px; }
                 overflow: hidden; text-overflow: ellipsis; }
 .mdeal-margin { font-size: 12.5px; font-weight: 650; margin-top: 8px; font-family: var(--mono); }
 .mdeal-more { margin-top: 10px; }
+
+/* ------------------------------------------------ split progress */
+.massign { flex-direction: column; align-items: stretch; gap: 10px; }
+.massign-row { display: flex; align-items: center; gap: 12px; }
+.massign.over { background: var(--down-soft); border-color: #f3c9c9; }
+.mprog { height: 10px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); overflow: hidden; }
+.mprog i { display: block; height: 100%; background: var(--accent); border-radius: 6px; transition: width .2s ease; }
+.massign.done .mprog i { background: var(--up); }
+.massign.over .mprog i, .mprog.over i { background: var(--down); }
+.mprog.lot { margin: 4px 0 6px; height: 12px; background: var(--bg); }
+.mprog-legend { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-2); }
+.mprog-legend + .mchips { padding-top: 10px; }
+/* each lot card fills blue from the left by the share of the lot being taken */
+.mlot { background: linear-gradient(to right, var(--accent-soft) var(--fill, 0%), var(--surface) var(--fill, 0%)); }
+.mlot.on { background: linear-gradient(to right, #d6e3ff var(--fill, 0%), var(--surface) var(--fill, 0%)); }
+.mlot.full { border-color: var(--accent); }

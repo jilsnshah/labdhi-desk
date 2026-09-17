@@ -433,30 +433,48 @@ function stepRate() {
 }
 
 // --------------------------------------------------------------- split
+// Progress is drawn, not just counted: the "still to assign" box fills blue
+// towards the sale quantity, and every lot card fills blue by how much of that
+// lot is being taken - so a lot at its limit looks full before anyone types.
+const pctOf = (part, whole) => (whole > 0 ? Math.max(0, Math.min(100, (part / whole) * 100)) : 0);
+
 function stepSplit() {
   if (ms.editingLot) return lotEditor();
   const fl = flow();
   const done = fl.left === 0, over = fl.left < 0;
+  const pct = pctOf(fl.assigned, ms.qty_g);
   return [
     h('div', { class: 'mt-q' }, `From which stock in ${ms.warehouse.name}?`),
     h('div', { class: 'mt-hint' }, 'Tap a lot to set how much comes out of it'),
-    h('div', { class: 'massign' + (done ? ' done' : '') },
-      h('div', {},
-        h('b', { class: 'num ' + (done ? 'up' : over ? 'down' : '') }, done ? 'All set' : f.qty(Math.abs(fl.left))),
-        h('span', {}, done ? `${f.qty(ms.qty_g)} assigned` : over ? 'too much — take some back' : 'still to assign')),
-      h('span', { class: 'grow' }),
-      fl.assigned ? h('button', { class: 'massign-act', onclick: () => { ms.alloc = {}; paint(); } }, 'Clear') : null,
-      h('button', { class: 'massign-act', onclick: () => { autoAssign(); paint(); } }, fl.assigned ? 'Fill rest' : 'Auto')),
-    ...fl.rows.map(row => h('button', {
-      class: 'mlot' + (row.take > 0 ? ' on' : ''), onclick: () => { ms.editingLot = row.lot.id; ms.entry = ''; paint(); }
-    },
-      h('div', { class: 'mlot-rate num' }, f.rate(row.lot.rate_paise)),
-      h('div', { class: 'mlot-main' },
-        h('b', {}, row.lot.supplier_name),
-        h('span', {}, `${f.qty(row.lot.available_g)} free · ${row.lot.deal_ref} · ${f.date(row.lot.deal_date)}`)),
-      h('div', { class: 'mlot-take' },
-        h('b', { class: 'num ' + (row.take ? '' : 'dim') }, row.take ? f.qty(row.take) : '—'),
-        h('span', { class: row.marginRate >= 0 ? 'up' : 'down' }, f.rateDelta(row.marginRate) + '/MT'))))
+    h('div', { class: 'massign' + (done ? ' done' : over ? ' over' : '') },
+      h('div', { class: 'massign-row' },
+        h('div', {},
+          h('b', { class: 'num ' + (done ? 'up' : over ? 'down' : '') }, done ? 'All set' : f.qty(Math.abs(fl.left))),
+          h('span', {}, done ? `${f.qty(ms.qty_g)} assigned` : over ? 'too much — take some back' : 'still to assign')),
+        h('span', { class: 'grow' }),
+        fl.assigned ? h('button', { class: 'massign-act', onclick: () => { ms.alloc = {}; paint(); } }, 'Clear') : null,
+        h('button', { class: 'massign-act', onclick: () => { autoAssign(); paint(); } }, fl.assigned ? 'Fill rest' : 'Auto')),
+      h('div', { class: 'mprog' }, h('i', { style: { width: pct + '%' } })),
+      h('div', { class: 'mprog-legend num' },
+        h('span', {}, `${f.qty(fl.assigned)} of ${f.qty(ms.qty_g)} filled`),
+        h('span', {}, `${Math.round(pct)}%`))),
+    ...fl.rows.map(row => {
+      const lp = pctOf(row.take, row.lot.available_g);
+      return h('button', {
+        class: 'mlot' + (row.take > 0 ? ' on' : '') + (lp >= 100 ? ' full' : ''),
+        style: { '--fill': lp + '%' },
+        onclick: () => { ms.editingLot = row.lot.id; ms.entry = ''; paint(); }
+      },
+        h('div', { class: 'mlot-rate num' }, f.rate(row.lot.rate_paise)),
+        h('div', { class: 'mlot-main' },
+          h('b', {}, row.lot.supplier_name),
+          h('span', {}, row.take
+            ? `${f.qty(row.take)} of ${f.qty(row.lot.available_g)} taken${lp >= 100 ? ' · full' : ''}`
+            : `${f.qty(row.lot.available_g)} free · ${row.lot.deal_ref} · ${f.date(row.lot.deal_date)}`)),
+        h('div', { class: 'mlot-take' },
+          h('b', { class: 'num ' + (row.take ? '' : 'dim') }, row.take ? f.qty(row.take) : '—'),
+          h('span', { class: row.marginRate >= 0 ? 'up' : 'down' }, f.rateDelta(row.marginRate) + '/MT')));
+    })
   ];
 }
 
@@ -465,17 +483,31 @@ function lotRoom(lot) {
   return Math.min(lot.available_g, ms.qty_g - others);
 }
 
+// Typing past what the lot holds, or past what the sale still needs, is shown
+// as it happens - the bar goes red and says what the amount will be set to -
+// instead of the figure quietly changing after "Set amount".
 function lotEditor() {
   const lot = ms.lots.find(l => l.id === ms.editingLot);
-  const room = lotRoom(lot);
+  const room = Math.max(0, lotRoom(lot));
+  const others = flow().assigned - (ms.alloc[lot.id] || 0);
   const live = ms.entry !== '' ? Math.round(parseFloat(ms.entry || '0') * MT) : (ms.alloc[lot.id] || 0);
+  const capped = live > room;
   const set = g => { ms.alloc[lot.id] = Math.max(0, Math.min(room, g)); ms.entry = ''; ms.editingLot = null; paint(); };
+  const why = live > lot.available_g
+    ? `This lot holds only ${f.qty(lot.available_g)}`
+    : `Only ${f.qty(Math.max(0, ms.qty_g - others))} of the sale is still to assign`;
   return [
     h('div', { class: 'mt-q' }, lot.supplier_name),
-    h('div', { class: 'mt-hint' }, `${f.rate(lot.rate_paise)} · ${f.qty(lot.available_g)} free · ${f.qty(Math.max(0, room))} can go here`),
-    h('div', { class: 'mnum-value' },
+    h('div', { class: 'mt-hint' }, `${f.rate(lot.rate_paise)} · ${f.qty(lot.available_g)} in this lot · ${f.qty(room)} can go here`),
+    h('div', { class: 'mnum-value' + (capped ? ' warn' : '') },
       h('b', {}, (ms.entry !== '' ? ms.entry : (live / MT || 0).toString()) + ' MT'),
-      h('small', {}, `${Math.round(live / 1000).toLocaleString('en-IN')} kg`)),
+      h('small', {}, capped ? `${why} — will be set to ${f.qty(room)}`
+                            : `${Math.round(live / 1000).toLocaleString('en-IN')} kg`)),
+    h('div', { class: 'mprog lot' + (capped ? ' over' : '') },
+      h('i', { style: { width: pctOf(Math.min(live, lot.available_g), lot.available_g) + '%' } })),
+    h('div', { class: 'mprog-legend num' },
+      h('span', {}, `${f.qty(Math.min(live, lot.available_g))} of ${f.qty(lot.available_g)} in this lot`),
+      h('span', {}, `sale ${f.qty(Math.min(ms.qty_g, others + Math.min(live, room)))} / ${f.qty(ms.qty_g)}`)),
     h('div', { class: 'mchips g2' },
       h('button', { class: 'mchip', onclick: () => set(room) }, `Rest · ${f.qty(room)}`),
       h('button', { class: 'mchip', onclick: () => set(0) }, 'None')),
