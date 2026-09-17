@@ -577,3 +577,26 @@ body.phone .more-count { font-size: 12px; }
   .mlive { padding: clamp(9px, 1.6svh, 15px) 15px; margin-bottom: clamp(6px, 1.4svh, 14px); }
   .mlive-top b { font-size: clamp(21px, 3.4svh, 27px); }
 }
+
+/* ================================================= fits every phone
+   - the app is the height of the visible screen (dvh), so nothing sits under
+     Safari's toolbar the way it does with 100vh
+   - the page keeps exactly the dock's measured height free (--dock-h is set
+     from the real dock by mobile.js), plus breathing room
+   - notices sit just above the dock
+   - a sheet is a column: its fields scroll, its buttons stay pinned on screen */
+body.phone #app { height: 100vh; height: 100dvh; }
+body.phone main { padding-bottom: calc(var(--dock-h) + 16px); scroll-padding-bottom: calc(var(--dock-h) + 16px); }
+body.phone.trading main { padding-bottom: 0; }
+body.phone #toasts { bottom: calc(var(--dock-h) + 10px); }
+body.phone.trading #toasts { bottom: calc(90px + env(safe-area-inset-bottom, 0px)); }
+@media (max-width: 760px) {
+  .modal { height: 100vh; height: 100dvh; }
+  .modal-card { max-height: 92vh; max-height: 92dvh; overflow: hidden; display: flex; flex-direction: column; }
+  .modal-card .form-grid { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+                           margin: 0 -16px; padding: 2px 16px 8px; }
+  .modal-card .modal-foot { position: static; flex: none; padding: 10px 0 0; margin: 0; border-top: 1px solid var(--line); }
+  .modal-card.wa-card { overflow-y: auto; }
+  .modal-card.wa-card .wa-msg { max-height: 34vh; max-height: 34dvh; }
+  .modal-card .modal-head, .modal-card .form-err { flex: none; }
+}

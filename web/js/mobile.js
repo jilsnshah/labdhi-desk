@@ -39,6 +39,17 @@ export function mountShell(appCtx) {
   document.getElementById('app').prepend(head);
   document.body.appendChild(dock);
   syncTabs();
+
+  // The space kept free under the page is the dock's measured height, not a
+  // guess: an iPhone's home-indicator inset, the text size and the tab labels
+  // all change it, and a fixed number is how "Load more" ends up behind Buy/Sell.
+  const measure = () => {
+    const h = dock.offsetHeight;
+    if (h) document.documentElement.style.setProperty('--dock-h', h + 'px');
+  };
+  measure();
+  if (window.ResizeObserver) new ResizeObserver(measure).observe(dock);
+  window.addEventListener('orientationchange', () => setTimeout(measure, 300));
 }
 
 export function syncTabs() {
