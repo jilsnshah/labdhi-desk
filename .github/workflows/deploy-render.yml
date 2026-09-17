@@ -1,0 +1,75 @@
+# Deploy every push to main to Render, and prove it went live.
+#
+# The Render service is linked to this repo by URL rather than through Render's
+# GitHub app, so Render never hears about a push on its own. This workflow tells
+# Render to deploy the exact commit that was pushed, waits until that deploy is
+# live, then checks the site is serving a build of it. Any failure turns the run
+# red on GitHub.
+#
+# Needs one repository secret: RENDER_API_KEY.
+name: Deploy to Render
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push supersedes an older deploy still in flight.
+concurrency:
+  group: render-production
+  cancel-in-progress: true
+
+env:
+  SERVICE_ID: srv-daft3flg1s2s73831kig
+  SITE: https://labdhi-api.onrender.com
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Start deploy of ${{ github.sha }}
+        id: start
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          set -euo pipefail
+          resp=$(curl -sS --fail-with-body --max-time 60 -X POST \
+            -H "Authorization: Bearer $RENDER_API_KEY" -H "Content-Type: application/json" \
+            -d "{\"commitId\":\"$GITHUB_SHA\",\"clearCache\":\"do_not_clear\"}" \
+            "https://api.render.com/v1/services/$SERVICE_ID/deploys")
+          id=$(echo "$resp" | tr -d '\000-\037' | jq -r '.id')
+          echo "deploy id: $id"
+          test -n "$id" && test "$id" != "null"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: Wait until live
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          DEPLOY_ID: ${{ steps.start.outputs.id }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 120); do
+            status=$(curl -sS --max-time 30 -H "Authorization: Bearer $RENDER_API_KEY" \
+              "https://api.render.com/v1/services/$SERVICE_ID/deploys/$DEPLOY_ID" \
+              | tr -d '\000-\037' | jq -r '.status' || echo unknown)
+            echo "$(date -u +%H:%M:%S) $status"
+            case "$status" in
+              live) exit 0 ;;
+              build_failed|update_failed|canceled|deactivated|pre_deploy_failed)
+                echo "::error::Render deploy $DEPLOY_ID ended as $status"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Render deploy $DEPLOY_ID did not go live in 20 minutes"; exit 1
+
+      - name: Check the site serves the new frontend
+        run: |
+          set -euo pipefail
+          # the shell's asset prefix changes whenever any frontend file changes;
+          # the health check and a module under that prefix must both answer
+          curl -sS --fail --max-time 90 "$SITE/api/health"
+          prefix=$(curl -sS --fail --max-time 90 "$SITE/" | grep -oE '/b/[a-f0-9]+/' | head -1)
+          test -n "$prefix"
+          curl -sS --fail --max-time 60 -o /dev/null "$SITE${prefix}js/app.js"
+          echo "serving build $prefix"
