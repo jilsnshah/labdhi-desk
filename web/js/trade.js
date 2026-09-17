@@ -642,10 +642,15 @@ function blockTerms() {
           h('span', {}, state.transporter ? state.transporter.name : 'Choose from parties…'),
           state.transporter ? h('button', { class: 'pick-clear', onclick: e => { e.stopPropagation(); state.transporter = null; render(); } }, '×') : null)),
       h('div', { class: 'field' }, h('label', {}, 'Freight paid by'), seg('freight_by', ['Buyer', 'Seller'])),
-      h('div', { class: 'field' }, h('label', {}, 'Delivery by'), seg('delivery_by', ['Buyer', 'Seller'])),
+      h('div', { class: 'field' }, h('label', {}, 'Transport arranged by'), seg('delivery_by', ['Buyer', 'Seller'])),
       h('div', { class: 'field' }, h('label', {}, 'Payment terms'),
-        h('input', { data: { fkey: 'pay' }, value: t.payment_terms, placeholder: '30 days',
-          oninput: e => { t.payment_terms = e.target.value; } })),
+        h('input', { data: { fkey: 'pay' }, value: t.payment_terms, placeholder: 'or type custom terms',
+          oninput: e => { t.payment_terms = e.target.value; } }),
+        h('div', { class: 'due-chips' },
+          ...['Immediate', '7 days', '15 days', '21 days', '30 days'].map(v => h('button', {
+            type: 'button', class: 'chip' + (t.payment_terms === v ? ' on' : ''),
+            onclick: () => { t.payment_terms = v; render(); }
+          }, v)))),
       h('div', { class: 'field' }, h('label', {}, 'Payment due'),
         h('input', { type: 'date', data: { fkey: 'due' }, value: state.payment_due || '',
           oninput: e => { state.payment_due = e.target.value; } }),

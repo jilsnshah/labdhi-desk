@@ -124,7 +124,7 @@ export function dealDetail(deal, ctx, reload) {
       fact('Ex-Place', deal.ex_place),
       fact('Transporter', deal.transporter_name),
       fact('Freight paid by', deal.freight_by),
-      fact('Delivery by', deal.delivery_by),
+      fact('Transport arranged by', deal.delivery_by),
       fact('Payment terms', deal.payment_terms),
       fact('E-way bill', deal.eway),
       fact('Note', deal.remarks),

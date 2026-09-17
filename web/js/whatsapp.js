@@ -25,38 +25,55 @@ export function waPhone(raw) {
   return d.length >= 11 && d.length <= 15 ? d : null;
 }
 
-const longDate = iso => {
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// 2026-09-17 -> 17-Sep-2026
+const dmy = iso => {
   if (!iso) return '';
-  const d = new Date(iso + 'T00:00:00');
-  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  const [y, m, d] = iso.slice(0, 10).split('-');
+  return `${d}-${MONTHS[+m - 1]}-${y}`;
 };
-const paidBy = who => (who ? `paid by ${String(who).toLowerCase()}` : '');
+const dash = v => (v === null || v === undefined || String(v).trim() === '' ? '—' : String(v).trim());
+const byWhom = (verb, who) => (who ? `${verb} by ${String(who).toLowerCase()}` : '');
+const RULE = '──────────────';
 
-// Every field of the sauda, one per line, in the order a trader reads it.
-// Fields with nothing recorded keep their line, left blank.
+// The sauda confirmation as Labdhi Exim sends it. Every field keeps its line;
+// anything not recorded shows "—". Fields the deal carries beyond the standard
+// layout (e-way bill, warehouse, payment due date, note) are kept, not dropped.
 export function saudaMessage(deal, company) {
   const sell = deal.side === 'sell';
-  const rate = (deal.rate_paise / 100).toFixed(2) + (deal.plus_gst ? '+' : ' (incl. GST)');
-  const payment = [deal.payment_terms, deal.payment_due ? `due ${longDate(deal.payment_due)}` : '']
-    .filter(Boolean).join(', ');
-  const lines = [
-    ['Sauda No', deal.ref],
-    ['Date', longDate(deal.deal_date)],
-    ['Seller', sell ? company : deal.party_name],
-    ['Buyer', sell ? deal.party_name : company],
-    ['Material', deal.product],
-    ['Weight', `${Math.round(deal.qty_g / 1000).toLocaleString('en-IN')} kg`],
-    ['Rate', `${rate} per kg`],
-    ['Delivery', paidBy(deal.delivery_by)],
-    ['Freight', paidBy(deal.freight_by)],
-    ['Payment', payment],
-    ['Transport', deal.transporter_name || ''],
-    ['Eway', deal.eway || ''],
-    [sell ? 'Dispatch from' : 'Delivery at', deal.warehouse || ''],
-    ['Ex-Place', deal.ex_place || ''],
-    ['Note', deal.remarks || '']
-  ];
-  return ['Sauda update', ...lines.map(([k, v]) => `${k} : ${v ?? ''}`)].join('\n');
+  const firm = String(company || 'Labdhi Exim').toUpperCase();
+  const kg = Math.round(deal.qty_g / 1000);
+  const mt = (deal.qty_g / 1e6).toLocaleString('en-IN', { maximumFractionDigits: 3 });
+  const rate = `₹${(deal.rate_paise / 100).toFixed(2)}/kg ${deal.plus_gst ? '+ GST' : 'incl. GST'}`;
+  const transport = [byWhom('Arranged', deal.delivery_by), deal.transporter_name].filter(Boolean).join(' · ');
+  const product = deal.manufacturer ? `${deal.material} (${deal.manufacturer})` : deal.material;
+  return [
+    `🏢 *${firm}*`,
+    '*SAUDA CONFIRMATION*',
+    RULE,
+    `📅 Date: ${dash(dmy(deal.deal_date))}`,
+    `🔖 Sauda No.: ${dash(deal.ref)}`,
+    `Seller: ${dash(sell ? firm : deal.party_name)}`,
+    `Buyer: ${dash(sell ? deal.party_name : firm)}`,
+    `Product: ${dash(product)}`,
+    `Grade: ${dash(deal.grade)}`,
+    `Quantity: ${deal.qty_g ? `${mt} MT (${kg.toLocaleString('en-IN')} kg)` : '—'}`,
+    `Rate: ${deal.rate_paise ? rate : '—'}`,
+    `Ex-Place: ${dash(deal.ex_place)}`,
+    `Transport: ${dash(transport)}`,
+    `Freight: ${dash(byWhom('Paid', deal.freight_by))}`,
+    `Payment Terms: ${dash(deal.payment_terms)}`,
+    `Payment Due: ${dash(dmy(deal.payment_due))}`,
+    `E-way Bill: ${dash(deal.eway)}`,
+    `${sell ? 'Dispatch From' : 'Delivery At'}: ${dash(deal.warehouse)}`,
+    `Note: ${dash(deal.remarks)}`,
+    RULE,
+    '⚠️ Payment must be made strictly as per the agreed terms above. Delayed payment will attract interest @ 2% per month on the overdue amount until the date of actual payment.',
+    RULE,
+    'Kindly verify the above details and reply *CONFIRMED* to confirm this Sauda.',
+    '',
+    `*${firm}*`
+  ].join('\n');
 }
 
 export function openWhatsApp(phone, text) {

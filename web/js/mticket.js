@@ -594,8 +594,9 @@ function openTerms() {
         pick: async () => { const p = await pickParty('Choose transporter'); return p ? { id: p.id, label: p.name, party: p } : null; } },
       { key: 'ex_place', label: 'Ex-Place', value: ms.ex_place, placeholder: 'Mundra / Aslali / Other' },
       { key: 'freight_by', label: 'Freight paid by', type: 'choice', options: ['Buyer', 'Seller'], value: t.freight_by },
-      { key: 'delivery_by', label: 'Delivery by', type: 'choice', options: ['Buyer', 'Seller'], value: t.delivery_by },
-      { key: 'payment_terms', label: 'Payment terms', value: t.payment_terms, placeholder: '30 days' },
+      { key: 'delivery_by', label: 'Transport arranged by', type: 'choice', options: ['Buyer', 'Seller'], value: t.delivery_by },
+      { key: 'payment_terms', label: 'Payment terms', value: t.payment_terms, placeholder: 'or type custom terms',
+        chips: [['Immediate', 'Immediate'], ['7 days', '7 days'], ['15 days', '15 days'], ['21 days', '21 days'], ['30 days', '30 days']].map(([l, v]) => [l, () => v]) },
       { key: 'eway', label: 'E-way bill', value: t.eway, placeholder: 'ASL to buyer' },
       { key: 'remarks', label: 'Note', value: t.remarks, placeholder: 'anything worth remembering' }
     ],
