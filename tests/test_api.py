@@ -150,6 +150,22 @@ class TestEveryEndpoint(unittest.TestCase):
         empty = api.export_flow(date_from="1990-01-01", date_to="1990-01-31")
         self.assertEqual(load_workbook(io.BytesIO(empty.body))["Material Flow"]["A5"].value, "No sales in this period.")
 
+    def test_tape_export_matches_the_tape(self):
+        import io
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(api.export_tape(side="sell").body))
+        self.assertEqual(wb.sheetnames, ["Summary", "Saudas", "Payments Due", "By Party", "By Product",
+                                         "By Month", "Cancelled"])
+        refs = [r[1] for r in wb["Saudas"].iter_rows(min_row=5, values_only=True) if r[0] not in (None, "TOTAL")]
+        tape = api.list_deals(side="sell", status="booked", limit=200)["items"]
+        self.assertEqual(sorted(refs), sorted(d["ref"] for d in tape))
+        margin = sum(r[19] or 0 for r in wb["Saudas"].iter_rows(min_row=5, values_only=True)
+                     if r[0] not in (None, "TOTAL"))
+        self.assertAlmostEqual(margin, sum(d["margin_paise"] for d in tape) / 100, places=2)
+        by_party = sum(r[11] or 0 for r in wb["By Party"].iter_rows(min_row=5, values_only=True)
+                       if r[0] not in (None, "TOTAL"))
+        self.assertAlmostEqual(by_party, margin, places=2)
+
     def test_sell_preview(self):
         plan = api.preview_sell(api.PreviewIn(product_id=self.product_id,
                                               warehouse_id=self.wh["Mundra"], qty_g=MT, rate_paise=12000))

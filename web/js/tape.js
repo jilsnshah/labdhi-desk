@@ -9,6 +9,7 @@ import { pagedList, counter } from './lists.js';
 import { showNode } from './flow.js';
 import { transferForm, adjustForm } from './forms.js';
 import { sendSauda } from './whatsapp.js';
+import { exportButton } from './export.js';
 
 const COLUMNS = ['Sauda No.', 'Date', 'Type', 'Party', 'Product / Grade',
   { label: 'Qty (MT)', cls: 'r' }, { label: 'Rate (₹/kg)', cls: 'r' }, 'Warehouse', 'Status', 'Delivery',
@@ -64,7 +65,8 @@ export async function renderTape(root, ctx) {
   });
 
   mount(root, h('div', { class: 'view' },
-    h('div', { class: 'section-head' }, h('h2', {}, 'Trade tape'), h('i', { class: 'rule' }), count),
+    h('div', { class: 'section-head' }, h('h2', {}, 'Trade tape'), h('i', { class: 'rule' }), count,
+      exportButton('/api/export/tape', () => ({ q: query, ...filters }), { name: 'Labdhi-Sauda-Report.xlsx' })),
     searchBar('Search Sauda No., party, GSTIN, product, warehouse or transporter…', t => { query = t; reload(); }),
     ui.el, list.el,
     h('div', { class: 'section-head', style: { marginTop: '32px' } },

@@ -356,6 +356,21 @@ def export_flow(date_from: Optional[str] = None, date_to: Optional[str] = None,
                     headers={"Content-Disposition": 'attachment; filename="%s"' % report.filename(date_from, date_to)})
 
 
+@app.get("/api/export/tape")
+def export_tape(q: str = "", side: Optional[str] = None, status: Optional[str] = None,
+                party_id: Optional[int] = None, product_id: Optional[int] = None,
+                warehouse_id: Optional[int] = None, material_id: Optional[int] = None,
+                grade_id: Optional[int] = None, manufacturer_id: Optional[int] = None,
+                date_from: Optional[str] = None, date_to: Optional[str] = None):
+    """The tape, with the same filters, as an Excel workbook."""
+    data = report.tape_workbook(q=q, side=side, status=status, party_id=party_id, product_id=product_id,
+                                warehouse_id=warehouse_id, material_id=material_id, grade_id=grade_id,
+                                manufacturer_id=manufacturer_id, date_from=date_from, date_to=date_to)
+    return Response(content=data,
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": 'attachment; filename="%s"' % report.tape_filename(date_from, date_to)})
+
+
 @app.get("/api/trace/{kind}/{entity_id}")
 def trace(kind: str, entity_id: int):
     if kind not in ("lot", "sale"):

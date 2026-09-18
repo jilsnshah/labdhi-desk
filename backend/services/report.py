@@ -167,6 +167,70 @@ def _fmt_mt(g) -> str:
     return ("%.3f" % _mt(g)).rstrip("0").rstrip(".")
 
 
+# ------------------------------------------------------------------ sheet helpers
+def _table(ws, top: int, columns: List[tuple], rows: List[List[Any]], totals: Dict[str, Any] = None,
+           zebra: bool = True, group_fill=None, freeze_col: int = 3) -> int:
+    """columns: (header, width, number_format or None). Writes a filterable,
+    frozen table starting at row `top`, with an optional TOTAL row that follows
+    the filter; returns the row after it."""
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+    border = Border(bottom=Side(style="thin", color=LINE))
+    head_font = Font(bold=True, color="FFFFFF", size=10.5)
+    head_fill = PatternFill("solid", fgColor=HEAD_FILL)
+    total_fill = PatternFill("solid", fgColor=BLUE_SOFT)
+    for c, (name, width, _fmt) in enumerate(columns, start=1):
+        cell = ws.cell(row=top, column=c, value=name)
+        cell.font, cell.fill = head_font, head_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.column_dimensions[get_column_letter(c)].width = width
+    ws.row_dimensions[top].height = 32
+    for i, row in enumerate(rows, start=1):
+        fill = group_fill(i - 1) if group_fill else (PatternFill("solid", fgColor="F7F8F5") if zebra and i % 2 == 0 else None)
+        for c, value in enumerate(row, start=1):
+            cell = ws.cell(row=top + i, column=c, value=value)
+            fmt = columns[c - 1][2]
+            if fmt:
+                cell.number_format = fmt
+            if fill:
+                cell.fill = fill
+            cell.border = border
+            cell.alignment = Alignment(vertical="top", wrap_text=isinstance(value, str) and len(value) > 38)
+    last = top + len(rows)
+    if rows:
+        ws.auto_filter.ref = "A%d:%s%d" % (top, get_column_letter(len(columns)), last)
+    ws.freeze_panes = ws.cell(row=top + 1, column=freeze_col)
+    if totals and rows:
+        t = last + 1
+        ws.cell(row=t, column=1, value="TOTAL").font = Font(bold=True)
+        for c, (name, _w, fmt) in enumerate(columns, start=1):
+            if name in totals:
+                kind = totals[name]
+                col = get_column_letter(c)
+                value = ("=SUBTOTAL(9,%s%d:%s%d)" % (col, top + 1, col, last)) if kind == "sum" else kind(top + 1, last)
+                cell = ws.cell(row=t, column=c, value=value)
+                cell.number_format = fmt or KG
+                cell.font = Font(bold=True)
+            ws.cell(row=t, column=c).fill = total_fill
+        return t + 1
+    return last + 1
+
+
+def _title(ws, company: str, text: str, sub: str) -> None:
+    from openpyxl.styles import Font
+    ws["A1"] = "%s — %s" % (company.upper(), text)
+    ws["A1"].font = Font(bold=True, size=15, color=INK)
+    ws["A2"] = sub
+    ws["A2"].font = Font(size=10.5, color=MUTED)
+    ws.sheet_view.showGridLines = False
+
+
+def _col(columns: List[tuple], name: str) -> str:
+    """Excel column letter of a header, for formulas in TOTAL rows."""
+    from openpyxl.utils import get_column_letter
+    return get_column_letter([c[0] for c in columns].index(name) + 1)
+
+
 # ------------------------------------------------------------------ workbook
 def flow_workbook(date_from: Optional[str] = None, date_to: Optional[str] = None,
                   product_id: Optional[int] = None, warehouse_id: Optional[int] = None) -> bytes:
@@ -190,61 +254,8 @@ def flow_workbook(date_from: Optional[str] = None, date_to: Optional[str] = None
                            _d(date_to).strftime("%d-%b-%Y") if date_to else date.today().strftime("%d-%b-%Y"))
 
     wb = Workbook()
-    thin = Side(style="thin", color=LINE)
-    border = Border(bottom=thin)
-    head_font = Font(bold=True, color="FFFFFF", size=10.5)
-    head_fill = PatternFill("solid", fgColor=HEAD_FILL)
-    total_fill = PatternFill("solid", fgColor=BLUE_SOFT)
-
-    def table(ws, top: int, columns: List[tuple], rows: List[List[Any]], totals: Dict[str, Any] = None,
-              zebra: bool = True, group_fill=None):
-        """columns: (header, width, number_format or None). Writes a filterable,
-        frozen table starting at row `top`; returns the row after it."""
-        for c, (name, width, _fmt) in enumerate(columns, start=1):
-            cell = ws.cell(row=top, column=c, value=name)
-            cell.font, cell.fill = head_font, head_fill
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            ws.column_dimensions[get_column_letter(c)].width = width
-        ws.row_dimensions[top].height = 32
-        for i, row in enumerate(rows, start=1):
-            fill = group_fill(i - 1) if group_fill else (PatternFill("solid", fgColor="F7F8F5") if zebra and i % 2 == 0 else None)
-            for c, value in enumerate(row, start=1):
-                cell = ws.cell(row=top + i, column=c, value=value)
-                fmt = columns[c - 1][2]
-                if fmt:
-                    cell.number_format = fmt
-                if fill:
-                    cell.fill = fill
-                cell.border = border
-                cell.alignment = Alignment(vertical="top", wrap_text=isinstance(value, str) and len(value) > 38)
-        last = top + len(rows)
-        if rows:
-            ws.auto_filter.ref = "A%d:%s%d" % (top, get_column_letter(len(columns)), last)
-        ws.freeze_panes = ws.cell(row=top + 1, column=3)
-        if totals and rows:
-            t = last + 1
-            ws.cell(row=t, column=1, value="TOTAL").font = Font(bold=True)
-            for c, (name, _w, fmt) in enumerate(columns, start=1):
-                if name in totals:
-                    kind = totals[name]
-                    col = get_column_letter(c)
-                    if kind == "sum":
-                        value = "=SUBTOTAL(9,%s%d:%s%d)" % (col, top + 1, col, last)
-                    else:
-                        value = kind(top + 1, last)
-                    cell = ws.cell(row=t, column=c, value=value)
-                    cell.number_format = fmt or KG
-                    cell.font = Font(bold=True)
-                ws.cell(row=t, column=c).fill = total_fill
-            return t + 1
-        return last + 1
-
-    def title(ws, text, sub):
-        ws["A1"] = "%s — %s" % (company.upper(), text)
-        ws["A1"].font = Font(bold=True, size=15, color=INK)
-        ws["A2"] = sub
-        ws["A2"].font = Font(size=10.5, color=MUTED)
-        ws.sheet_view.showGridLines = False
+    table = _table
+    title = lambda ws, text, sub: _title(ws, company, text, sub)   # noqa: E731
 
     scope = ["Period: %s" % period]
     if product_name:
@@ -468,3 +479,330 @@ def filename(date_from: Optional[str], date_to: Optional[str]) -> str:
     a = (date_from or "start").replace("-", "")
     b = (date_to or date.today().isoformat()).replace("-", "")
     return "Labdhi-Flow-of-Material_%s-%s.xlsx" % (a, b)
+
+
+# ================================================================== the tape
+# The deal register as a workbook: every sauda the tape's filters select, plus
+# the views a trader actually asks for - what is owed and by when, who the desk
+# trades with and how profitably, which products earn, and month by month.
+def tape_workbook(**filters) -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from . import deals as deals_svc
+
+    filters = {k: v for k, v in filters.items() if v not in (None, "")}
+    where, args = deals_svc._deal_filters(**filters)
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    rows = [deals_svc._dress(r) for r in db.q(
+        deals_svc.DEAL_SELECT + clause + " ORDER BY d.deal_date, d.id", args)]
+    booked = [d for d in rows if d["status"] == "booked"]
+    cancelled = [d for d in rows if d["status"] == "cancelled"]
+
+    # read from the party records the deals point at
+    pids = sorted({d["party_id"] for d in rows})
+    party = {}
+    if pids:
+        party = {p["id"]: p for p in db.dicts(db.q(
+            "SELECT id, phone, state_code FROM parties WHERE id IN (%s)" % ",".join("?" * len(pids)), pids))}
+    from ..gst import state_name
+    state = lambda d: state_name((party.get(d["party_id"]) or {}).get("state_code"))   # noqa: E731
+    phone = lambda d: (party.get(d["party_id"]) or {}).get("phone") or ""             # noqa: E731
+
+    # what is left of each purchase, and where each sale's material came from
+    buy_ids = [d["id"] for d in booked if d["side"] == "buy"]
+    left = defaultdict(int)
+    if buy_ids:
+        for r in db.q("""SELECT deal_id, SUM(qty_g - qty_allocated_g - qty_out_g) AS g FROM lots
+                         WHERE status = 'open' AND deal_id IN (%s) GROUP BY deal_id""" % ",".join("?" * len(buy_ids)), buy_ids):
+            left[r["deal_id"]] = r["g"] or 0
+    sell_ids = [d["id"] for d in booked if d["side"] == "sell"]
+    sources = defaultdict(list)
+    if sell_ids:
+        for r in db.q("""SELECT a.sale_deal_id, a.qty_g, a.cost_paise, bd.ref, sp.name FROM allocations a
+                         JOIN lots l ON l.id = a.lot_id JOIN deals bd ON bd.id = l.deal_id
+                         JOIN parties sp ON sp.id = l.supplier_id
+                         WHERE a.active = 1 AND a.sale_deal_id IN (%s) ORDER BY a.id""" % ",".join("?" * len(sell_ids)), sell_ids):
+            sources[r["sale_deal_id"]].append("%s %s MT @ ₹%.2f (%s)" % (r["name"], _fmt_mt(r["qty_g"]), r["cost_paise"] / 100, r["ref"]))
+
+    today = date.today()
+    company = db.settings().get("company_name") or "Labdhi Exim"
+
+    def money(d):
+        value = _money(d["qty_g"], d["rate_paise"])
+        margin = round(d["margin_paise"] / 100.0, 2) if d["side"] == "sell" else None
+        cost = round(value - margin, 2) if margin is not None else None
+        return value, cost, margin
+
+    def due_status(d):
+        due = _d(d["payment_due"])
+        if not due:
+            return None, ""
+        days = (due - today).days
+        return days, ("Overdue %d day%s" % (-days, "" if days == -1 else "s") if days < 0
+                      else "Due today" if days == 0 else "Due in %d day%s" % (days, "" if days == 1 else "s"))
+
+    # ---- what the filters were
+    names = []
+    if filters.get("date_from") or filters.get("date_to"):
+        names.append("Period: %s to %s" % (_d(filters["date_from"]).strftime("%d-%b-%Y") if filters.get("date_from") else "the beginning",
+                                            _d(filters["date_to"]).strftime("%d-%b-%Y") if filters.get("date_to") else today.strftime("%d-%b-%Y")))
+    else:
+        names.append("Period: all dates")
+    if filters.get("side"):
+        names.append("Only %ss" % filters["side"])
+    if filters.get("status"):
+        names.append("Status: %s" % filters["status"])
+    for key, sql in (("warehouse_id", "SELECT name FROM warehouses WHERE id=?"),
+                     ("material_id", "SELECT name FROM materials WHERE id=?"),
+                     ("grade_id", "SELECT g.name FROM grades g WHERE g.id=?"),
+                     ("manufacturer_id", "SELECT name FROM manufacturers WHERE id=?"),
+                     ("product_id", "SELECT display FROM v_products WHERE id=?"),
+                     ("party_id", "SELECT name FROM parties WHERE id=?")):
+        if filters.get(key):
+            names.append("%s: %s" % (key.replace("_id", "").capitalize(), db.scalar(sql, (int(filters[key]),), "?")))
+    if filters.get("q"):
+        names.append('Search: "%s"' % filters["q"])
+    scope = "   ·   ".join(names)
+
+    wb = Workbook()
+    title = lambda ws, text, sub=scope: _title(ws, company, text, sub)   # noqa: E731
+    buy_fill, sell_fill = PatternFill("solid", fgColor="EEF3FE"), PatternFill("solid", fgColor="EAF6EF")
+
+    # ================================================================ Saudas
+    ws = wb.active
+    ws.title = "Saudas"
+    title(ws, "Sauda register", scope + "   ·   booked saudas, oldest first (cancelled ones are on their own sheet)")
+    cols = [("Date", 12, DATE), ("Sauda No.", 15, None), ("Type", 7, None), ("Party", 28, None),
+            ("Party GSTIN", 17, None), ("State", 12, None), ("Phone", 14, None),
+            ("Material", 10, None), ("Grade", 10, None), ("Manufacturer", 17, None), ("Warehouse", 12, None),
+            ("Qty (kg)", 12, KG), ("Qty (MT)", 10, MT), ("Rate ₹/kg", 11, RATE), ("GST", 10, None),
+            ("Value ₹ (basic)", 15, MONEY), ("Buy value ₹", 14, MONEY), ("Sale value ₹", 14, MONEY),
+            ("Cost of sold ₹", 14, MONEY), ("Margin ₹", 13, MONEY), ("Margin ₹/kg", 11, MARGIN_RATE),
+            ("Margin %", 9, PCT), ("Material came from / went to", 48, None),
+            ("Sold so far (kg)", 12, KG), ("Still in stock (kg)", 12, KG),
+            ("Payment terms", 13, None), ("Payment due", 12, DATE), ("Payment status", 16, None),
+            ("Transporter", 18, None), ("Transport arranged by", 12, None), ("Freight paid by", 11, None),
+            ("Ex-Place", 12, None), ("E-way bill", 14, None), ("Note", 26, None)]
+    data, sides = [], []
+    for d in booked:
+        value, cost, margin = money(d)
+        sell = d["side"] == "sell"
+        _days, status = due_status(d)
+        data.append([
+            _d(d["deal_date"]), d["ref"], "SELL" if sell else "BUY", d["party_name"], d["party_gstin"] or "",
+            state(d), phone(d), d["material"], d["grade"], d["manufacturer"], d["warehouse"] or "",
+            _kg(d["qty_g"]), _mt(d["qty_g"]), _r(d["rate_paise"]), "GST extra" if d["plus_gst"] else "incl. GST",
+            value, None if sell else value, value if sell else None, cost, margin,
+            round(margin / _kg(d["qty_g"]), 2) if sell and d["qty_g"] else None,
+            (margin / cost) if sell and cost else None,
+            "; ".join(sources[d["id"]]) if sell else "",
+            None if sell else _kg(d["sold_g"]), None if sell else _kg(left[d["id"]]),
+            d["payment_terms"] or "", _d(d["payment_due"]), status,
+            d["transporter_name"] or "", d["delivery_by"] or "", d["freight_by"] or "",
+            d["ex_place"] or "", d["eway"] or "", d["remarks"] or ""])
+        sides.append(d["side"])
+    buys_went = {}
+    if buy_ids:
+        for r in db.q("""SELECT l.deal_id, a.qty_g, sd.ref, cp.name FROM allocations a JOIN lots l ON l.id = a.lot_id
+                         JOIN deals sd ON sd.id = a.sale_deal_id JOIN parties cp ON cp.id = sd.party_id
+                         WHERE a.active = 1 AND sd.status = 'booked' AND l.deal_id IN (%s)
+                         ORDER BY sd.deal_date, sd.id""" % ",".join("?" * len(buy_ids)), buy_ids):
+            buys_went.setdefault(r["deal_id"], []).append("%s %s MT (%s)" % (r["name"], _fmt_mt(r["qty_g"]), r["ref"]))
+    for row, d in zip(data, booked):
+        if d["side"] == "buy":
+            row[22] = "; ".join(buys_went.get(d["id"], []))
+    m, c = _col(cols, "Margin ₹"), _col(cols, "Cost of sold ₹")
+    _table(ws, 4, cols, data, totals={
+        "Qty (kg)": "sum", "Qty (MT)": "sum", "Buy value ₹": "sum", "Sale value ₹": "sum",
+        "Cost of sold ₹": "sum", "Margin ₹": "sum",
+        "Margin %": lambda a, z: "=IFERROR(%s%d/%s%d,0)" % (m, z + 1, c, z + 1)},
+        group_fill=lambda i: sell_fill if sides[i] == "sell" else buy_fill, freeze_col=5)
+    if not data:
+        ws["A5"] = "No booked saudas match these filters."
+        ws["A5"].font = Font(italic=True, color=MUTED)
+
+    # ================================================================ Payments
+    ws = wb.create_sheet("Payments Due")
+    title(ws, "Payments due", scope + "   ·   from the payment due date on each sauda; receipts are not tracked here")
+    dues = []
+    for d in booked:
+        days, status = due_status(d)
+        if days is None:
+            continue
+        sell = d["side"] == "sell"
+        dues.append((days, [_d(d["payment_due"]), days, status, "To receive" if sell else "To pay",
+                            d["party_name"], phone(d), d["ref"], _d(d["deal_date"]), d["product"],
+                            _mt(d["qty_g"]), _money(d["qty_g"], d["rate_paise"]),
+                            "GST extra" if d["plus_gst"] else "incl. GST", d["payment_terms"] or ""]))
+    dues.sort(key=lambda x: x[0])
+    cols = [("Due date", 12, DATE), ("Days", 7, '0;[Red]-0'), ("Status", 16, None), ("Direction", 11, None),
+            ("Party", 28, None), ("Phone", 14, None), ("Sauda No.", 15, None), ("Sauda date", 12, DATE),
+            ("Product", 30, None), ("Qty (MT)", 10, MT), ("Value ₹ (basic)", 15, MONEY), ("GST", 10, None),
+            ("Payment terms", 13, None)]
+    red, amber = PatternFill("solid", fgColor=RED_SOFT), PatternFill("solid", fgColor="FFF4DC")
+    _table(ws, 4, cols, [r for _, r in dues], totals={"Value ₹ (basic)": "sum"},
+           group_fill=lambda i: red if dues[i][0] < 0 else (amber if dues[i][0] <= 7 else None))
+    if not dues:
+        ws["A5"] = "No saudas here carry a payment due date."
+        ws["A5"].font = Font(italic=True, color=MUTED)
+
+    # ================================================================ By Party
+    ws = wb.create_sheet("By Party")
+    title(ws, "By party")
+    per = {}
+    for d in booked:
+        p = per.setdefault(d["party_id"], {"d": d, "n": 0, "bg": 0, "bv": 0.0, "sg": 0, "sv": 0.0, "margin": 0.0,
+                                            "cost": 0.0, "first": d["deal_date"], "last": d["deal_date"]})
+        value, cost, margin = money(d)
+        p["n"] += 1
+        p["first"], p["last"] = min(p["first"], d["deal_date"]), max(p["last"], d["deal_date"])
+        if d["side"] == "buy":
+            p["bg"] += d["qty_g"]; p["bv"] += value
+        else:
+            p["sg"] += d["qty_g"]; p["sv"] += value; p["margin"] += margin; p["cost"] += cost
+    data = []
+    for p in sorted(per.values(), key=lambda p: -(p["bv"] + p["sv"])):
+        d = p["d"]
+        data.append([d["party_name"], d["party_gstin"] or "", state(d), phone(d), p["n"],
+                     _mt(p["bg"]), round(p["bv"], 2), round(p["bv"] / _kg(p["bg"]), 2) if p["bg"] else None,
+                     _mt(p["sg"]), round(p["sv"], 2), round(p["sv"] / _kg(p["sg"]), 2) if p["sg"] else None,
+                     round(p["margin"], 2), (p["margin"] / p["cost"]) if p["cost"] else None,
+                     _d(p["first"]), _d(p["last"])])
+    cols = [("Party", 30, None), ("GSTIN", 17, None), ("State", 12, None), ("Phone", 14, None), ("Saudas", 8, '0'),
+            ("Bought from them (MT)", 12, MT), ("Purchase value ₹", 15, MONEY), ("Avg buy ₹/kg", 11, RATE),
+            ("Sold to them (MT)", 12, MT), ("Sale value ₹", 15, MONEY), ("Avg sale ₹/kg", 11, RATE),
+            ("Margin earned ₹", 14, MONEY), ("Margin %", 9, PCT), ("First sauda", 12, DATE), ("Last sauda", 12, DATE)]
+    _table(ws, 4, cols, data, totals={"Saudas": "sum", "Bought from them (MT)": "sum", "Purchase value ₹": "sum",
+                                      "Sold to them (MT)": "sum", "Sale value ₹": "sum", "Margin earned ₹": "sum"},
+           freeze_col=2)
+
+    # ================================================================ By Product
+    ws = wb.create_sheet("By Product")
+    title(ws, "By product")
+    per = {}
+    for d in booked:
+        p = per.setdefault(d["product_id"], {"d": d, "nb": 0, "ns": 0, "bg": 0, "bv": 0.0, "sg": 0, "sv": 0.0,
+                                              "margin": 0.0, "cost": 0.0})
+        value, cost, margin = money(d)
+        if d["side"] == "buy":
+            p["nb"] += 1; p["bg"] += d["qty_g"]; p["bv"] += value
+        else:
+            p["ns"] += 1; p["sg"] += d["qty_g"]; p["sv"] += value; p["margin"] += margin; p["cost"] += cost
+    stock_now = {r["product_id"]: r["g"] for r in db.q(
+        "SELECT product_id, SUM(qty_g - qty_allocated_g - qty_out_g) AS g FROM lots WHERE status='open' GROUP BY product_id")}
+    data = []
+    for pid_, p in sorted(per.items(), key=lambda kv: kv[1]["d"]["product"]):
+        d = p["d"]
+        data.append([d["product"], d["material"], d["grade"], d["manufacturer"], p["nb"], _mt(p["bg"]), round(p["bv"], 2),
+                     round(p["bv"] / _kg(p["bg"]), 2) if p["bg"] else None, p["ns"], _mt(p["sg"]), round(p["sv"], 2),
+                     round(p["sv"] / _kg(p["sg"]), 2) if p["sg"] else None, round(p["cost"], 2), round(p["margin"], 2),
+                     (p["margin"] / p["cost"]) if p["cost"] else None,
+                     round(p["margin"] / _kg(p["sg"]), 2) if p["sg"] else None, _mt(stock_now.get(pid_, 0))])
+    cols = [("Product", 32, None), ("Material", 10, None), ("Grade", 10, None), ("Manufacturer", 17, None),
+            ("Buys", 7, '0'), ("Bought (MT)", 11, MT), ("Purchase value ₹", 15, MONEY), ("Avg buy ₹/kg", 11, RATE),
+            ("Sells", 7, '0'), ("Sold (MT)", 11, MT), ("Sale value ₹", 15, MONEY), ("Avg sale ₹/kg", 11, RATE),
+            ("Cost of sold ₹", 14, MONEY), ("Margin ₹", 13, MONEY), ("Margin %", 9, PCT),
+            ("Margin ₹/kg", 11, MARGIN_RATE), ("In stock now (MT)", 12, MT)]
+    _table(ws, 4, cols, data, totals={"Buys": "sum", "Bought (MT)": "sum", "Purchase value ₹": "sum", "Sells": "sum",
+                                      "Sold (MT)": "sum", "Sale value ₹": "sum", "Cost of sold ₹": "sum",
+                                      "Margin ₹": "sum", "In stock now (MT)": "sum"}, freeze_col=2)
+
+    # ================================================================ By Month
+    ws = wb.create_sheet("By Month")
+    title(ws, "Month by month")
+    per = {}
+    for d in booked:
+        key = d["deal_date"][:7]
+        p = per.setdefault(key, {"nb": 0, "ns": 0, "bg": 0, "bv": 0.0, "sg": 0, "sv": 0.0, "margin": 0.0, "cost": 0.0})
+        value, cost, margin = money(d)
+        if d["side"] == "buy":
+            p["nb"] += 1; p["bg"] += d["qty_g"]; p["bv"] += value
+        else:
+            p["ns"] += 1; p["sg"] += d["qty_g"]; p["sv"] += value; p["margin"] += margin; p["cost"] += cost
+    data = [[datetime.strptime(k, "%Y-%m").strftime("%b %Y"), p["nb"], _mt(p["bg"]), round(p["bv"], 2), p["ns"],
+             _mt(p["sg"]), round(p["sv"], 2), round(p["cost"], 2), round(p["margin"], 2),
+             (p["margin"] / p["cost"]) if p["cost"] else None] for k, p in sorted(per.items())]
+    cols = [("Month", 11, None), ("Buys", 7, '0'), ("Bought (MT)", 11, MT), ("Purchase value ₹", 15, MONEY),
+            ("Sells", 7, '0'), ("Sold (MT)", 11, MT), ("Sale value ₹", 15, MONEY), ("Cost of sold ₹", 14, MONEY),
+            ("Margin ₹", 13, MONEY), ("Margin %", 9, PCT)]
+    _table(ws, 4, cols, data, totals={"Buys": "sum", "Bought (MT)": "sum", "Purchase value ₹": "sum", "Sells": "sum",
+                                      "Sold (MT)": "sum", "Sale value ₹": "sum", "Cost of sold ₹": "sum",
+                                      "Margin ₹": "sum"}, freeze_col=2)
+
+    # ================================================================ Cancelled
+    ws = wb.create_sheet("Cancelled")
+    title(ws, "Cancelled saudas", scope + "   ·   kept for the record; not counted anywhere else")
+    data = [[_d(d["deal_date"]), d["ref"], d["side"].upper(), d["party_name"], d["product"], d["warehouse"] or "",
+             _mt(d["qty_g"]), _r(d["rate_paise"]), _money(d["qty_g"], d["rate_paise"]), _d(d["cancelled_at"]),
+             d["remarks"] or ""] for d in cancelled]
+    cols = [("Date", 12, DATE), ("Sauda No.", 15, None), ("Type", 7, None), ("Party", 28, None), ("Product", 30, None),
+            ("Warehouse", 12, None), ("Qty (MT)", 10, MT), ("Rate ₹/kg", 11, RATE), ("Value ₹", 14, MONEY),
+            ("Cancelled on", 12, DATE), ("Note", 26, None)]
+    _table(ws, 4, cols, data)
+    if not data:
+        ws["A5"] = "No cancelled saudas match these filters."
+        ws["A5"].font = Font(italic=True, color=MUTED)
+
+    # ================================================================ Summary (first tab)
+    ws = wb.create_sheet("Summary", 0)
+    title(ws, "Sauda report")
+    ws["A3"] = "Generated %s" % datetime.now().strftime("%d-%b-%Y %H:%M")
+    ws["A3"].font = Font(size=9.5, color=MUTED)
+    buys = [d for d in booked if d["side"] == "buy"]
+    sells = [d for d in booked if d["side"] == "sell"]
+    bv = sum(_money(d["qty_g"], d["rate_paise"]) for d in buys)
+    sv = sum(_money(d["qty_g"], d["rate_paise"]) for d in sells)
+    margin = sum(money(d)[2] for d in sells)
+    cost = sv - margin
+    sold_g = sum(d["qty_g"] for d in sells)
+    overdue = [d for d in booked if (due_status(d)[0] or 0) < 0]
+    recv_over = sum(_money(d["qty_g"], d["rate_paise"]) for d in overdue if d["side"] == "sell")
+    pay_over = sum(_money(d["qty_g"], d["rate_paise"]) for d in overdue if d["side"] == "buy")
+    kpis = [
+        ("Booked saudas", len(booked), '0'), ("Purchases", len(buys), '0'), ("Sales", len(sells), '0'),
+        ("Bought (MT)", _mt(sum(d["qty_g"] for d in buys)), MT), ("Purchase value", round(bv, 2), MONEY),
+        ("Avg buy ₹/kg", round(bv / _kg(sum(d["qty_g"] for d in buys)), 2) if buys else 0, RATE),
+        ("Sold (MT)", _mt(sold_g), MT), ("Sale value", round(sv, 2), MONEY),
+        ("Avg sale ₹/kg", round(sv / _kg(sold_g), 2) if sold_g else 0, RATE),
+        ("Cost of material sold", round(cost, 2), MONEY), ("Margin", round(margin, 2), MONEY),
+        ("Margin %", (margin / cost) if cost else 0, PCT),
+        ("Overdue to receive", round(recv_over, 2), MONEY), ("Overdue to pay", round(pay_over, 2), MONEY),
+        ("Cancelled saudas", len(cancelled), '0'),
+    ]
+    for i, (name, value, fmt) in enumerate(kpis):
+        row, col = 5 + (i // 3) * 2, 1 + (i % 3) * 3
+        ws.cell(row=row, column=col, value=name).font = Font(size=9.5, color=MUTED, bold=True)
+        cell = ws.cell(row=row + 1, column=col, value=value)
+        cell.number_format, cell.font = fmt, Font(size=14, bold=True, color=INK)
+    for c in "ABCDEFGHI":
+        ws.column_dimensions[c].width = 20 if c in "ADG" else 6
+    notes = [
+        "What is in this report",
+        "• Saudas: every booked sauda matching the tape's filters — party, product, quantity, rate, value, and for a sale its cost, margin and which purchases it came from; for a purchase who it went to and what is still in stock. Buys are shaded blue, sells green.",
+        "• Payments Due: every sauda with a payment due date, soonest first — overdue in red, due within a week in amber. Values are basic (before GST); receipts are not recorded in the desk.",
+        "• By Party, By Product, By Month: the same saudas added up three ways.",
+        "• Cancelled: cancelled saudas, for the record only.",
+        "• Rates are ₹ per kg, basic. Every sheet has filters on its header row, and TOTAL rows recalculate for the filtered rows.",
+    ]
+    for i, text in enumerate(notes):
+        cell = ws.cell(row=17 + i, column=1, value=text)
+        cell.font = Font(bold=(i == 0), size=11 if i == 0 else 10, color=INK if i == 0 else MUTED)
+
+    for sheet in wb.worksheets:
+        sheet.page_setup.orientation = "landscape"
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 0
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        if sheet.title != "Summary":
+            sheet.print_title_rows = "4:4"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def tape_filename(date_from: Optional[str], date_to: Optional[str]) -> str:
+    if not date_from and not date_to:
+        return "Labdhi-Sauda-Report_%s.xlsx" % date.today().strftime("%Y%m%d")
+    return "Labdhi-Sauda-Report_%s-%s.xlsx" % ((date_from or "start").replace("-", ""),
+                                               (date_to or date.today().isoformat()).replace("-", ""))
