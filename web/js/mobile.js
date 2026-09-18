@@ -106,7 +106,7 @@ export function renderMobileDesk(root, s, appCtx) {
   mount(root, h('div', { class: 'view' },
     s.attention && s.attention.length
       ? h('div', { class: 'mflow', style: { paddingTop: '14px' } },
-          ...s.attention.slice(0, 3).map(a => h('div', { class: 'alert ' + a.level },
+          ...s.attention.slice(0, 3).map(a => h('div', { class: 'alert ' + a.level, onclick: () => a.route && ctx.go(a.route) },
             h('i', { class: 'bar' }), h('div', {}, h('b', {}, a.title), h('div', {}, h('span', {}, a.detail))))))
       : null,
     h('div', { class: 'mdesk' }, label('Positions', count), list.el)));

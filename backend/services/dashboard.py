@@ -54,64 +54,45 @@ def summary() -> Dict[str, Any]:
 
 
 def attention() -> List[Dict[str, Any]]:
-    """Only things that are actionable. An empty list is a good day."""
+    """Only things that need doing, one line per kind, however busy the book.
+
+    A sale below the cost of the lots it used is not listed here: it is a
+    trading outcome, not a task, and on a busy desk a line per such sale would
+    bury everything else - often for a purchase that made money overall. Losses
+    show where margins are read: red on the Tape and in the Excel reports.
+    """
     out: List[Dict[str, Any]] = []
 
-    for r in db.q(
-        """SELECT d.id, d.ref, d.uncovered_g, s.display AS product, p.name AS party
-           FROM deals d JOIN v_products s ON s.id=d.product_id JOIN parties p ON p.id=d.party_id
-           WHERE d.side='sell' AND d.status='booked' AND d.uncovered_g > 0
-           ORDER BY d.uncovered_g DESC LIMIT 5"""
-    ):
+    short = db.q1("""SELECT COUNT(*) AS n, COALESCE(SUM(uncovered_g), 0) AS g, MIN(id) AS first_id
+                     FROM deals WHERE side='sell' AND status='booked' AND uncovered_g > 0""")
+    if short["n"]:
         out.append({
-            "level": "danger", "kind": "short", "deal_id": r["id"],
-            "title": "%s is short %s" % (r["ref"], fmt_qty(r["uncovered_g"])),
-            "detail": "%s sold to %s is not covered by stock. Buy to cover."
-                      % (r["product"], r["party"]),
+            "level": "danger", "kind": "short", "deal_id": short["first_id"] if short["n"] == 1 else None,
+            "route": "tape",
+            "title": "%d sale%s not covered by stock (%s short)" % (short["n"], "" if short["n"] == 1 else "s",
+                                                                  fmt_qty(short["g"])),
+            "detail": "Buy to cover, or cancel the sale.",
         })
 
-    for r in db.q(
-        """SELECT d.id, d.ref, p.name AS party, s.display AS product,
-                  SUM(a.qty_g * (a.sale_rate_paise - a.cost_paise)) AS m
-           FROM deals d
-           JOIN allocations a ON a.sale_deal_id=d.id AND a.active=1
-           JOIN parties p ON p.id=d.party_id JOIN v_products s ON s.id=d.product_id
-           WHERE d.side='sell' AND d.status='booked'
-           GROUP BY d.id, d.ref, p.name, s.display
-           HAVING SUM(a.qty_g * (a.sale_rate_paise - a.cost_paise)) < 0
-           ORDER BY SUM(a.qty_g * (a.sale_rate_paise - a.cost_paise)) ASC LIMIT 5"""
-    ):
+    drafts = db.q1("SELECT COUNT(*) AS n, MIN(id) AS first_id FROM deals WHERE status='draft'")
+    if drafts["n"]:
         out.append({
-            "level": "warn", "kind": "loss", "deal_id": r["id"],
-            "title": "%s booked at a loss" % r["ref"],
-            "detail": "%s to %s" % (r["product"], r["party"]),
+            "level": "info", "kind": "draft", "deal_id": drafts["first_id"] if drafts["n"] == 1 else None,
+            "route": "tape",
+            "title": "%d sauda%s not booked yet" % (drafts["n"], "" if drafts["n"] == 1 else "s"),
+            "detail": "Confirm or discard.",
         })
 
-    for r in db.q(
-        """SELECT d.id, d.ref, d.side, p.name AS party, s.display AS product
-           FROM deals d JOIN parties p ON p.id=d.party_id JOIN v_products s ON s.id=d.product_id
-           WHERE d.status='draft' ORDER BY d.id DESC LIMIT 5"""
-    ):
+    stale = db.q1(
+        """SELECT COUNT(*) AS n, COALESCE(SUM({a}), 0) AS g, MIN(d.deal_date) AS oldest
+           FROM lots l JOIN deals d ON d.id = l.deal_id
+           WHERE l.status = 'open' AND {a} > 0 AND d.deal_date < ?""".format(a=AVAILABLE), (_since(30),))
+    if stale["n"]:
         out.append({
-            "level": "info", "kind": "draft", "deal_id": r["id"],
-            "title": "%s still a draft" % r["ref"],
-            "detail": "%s %s with %s - confirm or discard"
-                      % (r["side"].upper(), r["product"], r["party"]),
-        })
-
-    stale = _since(30)
-    for r in db.q(
-        """SELECT l.id, l.label, s.display AS product, w.name AS warehouse, d.deal_date,
-                  {a} AS available_g
-           FROM lots l JOIN deals d ON d.id=l.deal_id JOIN v_products s ON s.id=l.product_id
-           JOIN warehouses w ON w.id = l.warehouse_id
-           WHERE l.status='open' AND {a} > 0 AND d.deal_date < ?
-           ORDER BY d.deal_date LIMIT 5""".format(a=AVAILABLE), (stale,)
-    ):
-        out.append({
-            "level": "info", "kind": "stale", "lot_id": r["id"],
-            "title": "%s sitting in %s since %s" % (fmt_qty(r["available_g"]), r["warehouse"], r["deal_date"]),
-            "detail": "%s from %s" % (r["product"], r["label"]),
+            "level": "info", "kind": "stale", "route": "stock",
+            "title": "%s idle for over 30 days" % fmt_qty(stale["g"]),
+            "detail": "%d lot%s, the oldest bought %s. Open Stock to see them."
+                      % (stale["n"], "" if stale["n"] == 1 else "s", stale["oldest"]),
         })
     return out
 

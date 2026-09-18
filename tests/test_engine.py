@@ -211,5 +211,23 @@ class TestEntities(Base):
                     fn(conn, arg)
 
 
+
+class TestDeskAlerts(Base):
+    """The desk's alert list stays short however busy the book gets."""
+
+    def test_losses_are_not_alerts_and_each_kind_is_one_line(self):
+        from backend.services import dashboard
+        for i in range(8):
+            buy("Supplier %d" % i, 10 * MT, 10000, "2026-01-%02d" % (i + 1))      # old stock: idle > 30 days
+        for i in range(20):
+            sell("Buyer %d" % i, MT // 4, 9900, "2026-02-%02d" % (i + 1))          # every one below cost
+        alerts = dashboard.attention()
+        self.assertNotIn("loss", [a["kind"] for a in alerts])
+        kinds = [a["kind"] for a in alerts]
+        self.assertEqual(len(kinds), len(set(kinds)), "a kind repeated: %s" % kinds)
+        stale = next(a for a in alerts if a["kind"] == "stale")
+        self.assertIn("8 lots", stale["detail"])
+        self.assertEqual(stale["route"], "stock")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

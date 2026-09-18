@@ -82,7 +82,7 @@ export function renderDesk(root, s, ctx) {
         h('div', { class: 'value num', style: { color: tone } }, value),
         h('div', { class: 'sub' }, sub)))),
     s.attention.length ? h('div', { class: 'alerts' },
-      ...s.attention.map(a => h('div', { class: 'alert ' + a.level, onclick: () => a.deal_id && ctx.openDeal(a.deal_id) },
+      ...s.attention.map(a => h('div', { class: 'alert ' + a.level, onclick: () => (a.deal_id ? ctx.openDeal(a.deal_id) : a.route && ctx.go(a.route)) },
         h('i', { class: 'bar' }),
         h('div', {}, h('b', {}, a.title), h('div', {}, h('span', {}, a.detail)))))) : null,
     h('div', { class: 'section-head' }, h('h2', {}, 'Positions'), h('i', { class: 'rule' }), count),
