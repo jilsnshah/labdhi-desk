@@ -35,7 +35,9 @@ def book():
     """Everything a screen shows, plus the deals and the allocations, without clock times."""
     s = snapshot()
     s.pop("active_allocations")
-    s["ledger"] = sorted(map(repr, _strip(s["ledger"])))
+    # the same movements; "balance after" depends on the order of same-day rows, which follows
+    # the clock (an edit really does happen later), so it is left to test_stock's walk-back check
+    s["ledger"] = sorted(repr({k: v for k, v in r.items() if k != "balance_g"}) for r in _strip(s["ledger"]))
     # an edge is one allocation row; how many rows carry a lot's grams is bookkeeping
     s["graph"]["edges"] = sorted(repr({k: v for k, v in e.items() if k not in ("id", "method")})
                                  for e in s["graph"]["edges"])
@@ -80,6 +82,14 @@ def audit(test):
                                    (d["id"],)), 0)
     for pid in [r["id"] for r in db.q("SELECT id FROM products")]:
         conserved(test, pid)
+    # never free stock and an open short in the same place
+    for c in db.q("""SELECT product_id, warehouse_id FROM deals WHERE side='sell' AND status='booked'
+                     AND uncovered_g > 0 GROUP BY product_id, warehouse_id"""):
+        test.assertEqual(stock.available_in(c["product_id"], c["warehouse_id"]), 0,
+                         "free stock beside an open short in product %s warehouse %s"
+                         % (c["product_id"], c["warehouse_id"]))
+    for d in db.q("SELECT uncovered_g FROM deals"):
+        test.assertGreaterEqual(d["uncovered_g"], 0)
 
 
 def base():
@@ -301,9 +311,14 @@ class EditPurchase(Base):
         # newest sale moves first: Y keeps 2 on A, 3 go to B - exactly what FIFO does with A at 6
         self.same(edited, lambda: self.rebuilt(6 * MT, then=[lambda: sell("Buyer Y", 5 * MT, 10500, "2026-09-05")]))
 
-    def test_rehome_without_enough_stock_is_refused(self):
-        a, *_ = base(); sell("Buyer Y", 12 * MT, 10500, "2026-09-05")       # 6 A + 6 B, B keeps 2
-        self.unchanged(lambda: revise.edit_deal(a["id"], {"qty_g": 5 * MT}, rehome=True))
+    def test_rehome_without_enough_stock_leaves_the_rest_short(self):
+        def edited():
+            a, *_ = base(); sell("Buyer Y", 12 * MT, 10500, "2026-09-05")   # 6 A + 6 B, B keeps 2
+            revise.edit_deal(a["id"], {"qty_g": 5 * MT}, rehome=True)
+        # Y keeps 1 of A, moves 2 onto B, and 3 are short - what booking Y short against A=5 gives
+        self.same(edited, lambda: self.rebuilt(5 * MT, then=[
+            lambda: sell("Buyer Y", 12 * MT, 10500, "2026-09-05", allow_short=True)]))
+        self.assertEqual(db.q1("SELECT uncovered_g FROM deals WHERE id=5")["uncovered_g"], 3 * MT)
 
     def test_warehouse_when_nothing_sold(self):
         def edited():
@@ -358,8 +373,16 @@ class Rehome(Base):
             a, *_ = base(); sell("Buyer Y", 4 * MT, 10500, "2026-09-05")
             deals.cancel_deal(a["id"], rehome=True)
         self.same(edited_fits, fresh_book)
-        base(); a = deals.get_deal(1); sell("Buyer Y", 7 * MT, 10500, "2026-09-05")
-        self.unchanged(lambda: deals.cancel_deal(a["id"], rehome=True))
+
+        def fresh_short():
+            fresh(); a = buy("Supplier A", 10 * MT, 9500, "2026-09-01")
+            buy("Supplier B", 8 * MT, 9700, "2026-09-02")
+            buy("Supplier C", 5 * MT, 9600, "2026-09-03", wh="Aslali")
+            deals.cancel_deal(a["id"])
+            sell("Buyer X", 4 * MT, 10000, "2026-09-04")
+            sell("Buyer Y", 7 * MT, 10500, "2026-09-05", allow_short=True)
+        # Y does not fit: 3 of it is short again, as if it had been booked short
+        self.same(edited, fresh_short)
 
     def test_cancel_without_rehome_is_refused_with_what_is_sold(self):
         a, *_ = base()
@@ -415,7 +438,10 @@ class Preview(Base):
         p = revise.preview_cancel(a["id"])
         self.assertEqual(before, book())
         self.assertTrue(p["needs_rehome"])
-        self.assertIn("Not enough", p["error"])
+        self.assertIsNone(p["error"])
+        # X moves onto the 2 left of B and is 2 short; all 6 of Y's from A are short
+        self.assertEqual({s["ref"]: s["short_after_g"] for s in p["effects"]["sales"]},
+                         {"LE/26-27/0004": 2 * MT, "LE/26-27/0005": 6 * MT})
         p = revise.preview_cancel(4)                                          # a sale: plain cancel
         self.assertFalse(p["needs_rehome"])
         self.assertEqual(p["effects"]["sales"][0]["margin_after_paise"], None)

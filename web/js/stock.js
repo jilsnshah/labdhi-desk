@@ -26,7 +26,7 @@ export function renderStock(root, ctx) {
     },
       h('div', { class: 'wh-name' }, w.name),
       h('div', { class: 'wh-addr' }, w.address || 'no address'),
-      h('div', { class: 'wh-num num' }, f.qty(w.stock_g)),
+      h('div', { class: 'wh-num num' + f.neg(w.stock_g) }, f.qty(w.stock_g)),
       h('div', { class: 'wh-sub' }, `${f.inr(w.stock_value_paise, { compact: true })} · ${w.products} product${w.products === 1 ? '' : 's'}`)),
     empty: () => h('div', { class: 'empty small' }, 'No warehouses yet — add one to start receiving stock.')
   });
@@ -85,7 +85,8 @@ function stockRow(r, after) {
   const tr = h('tr', { class: 'click' },
     h('td', { class: 'product' }, h('b', {}, `${r.material} ${r.grade}`), h('small', {}, r.manufacturer)),
     h('td', {}, r.warehouse),
-    h('td', { class: 'r mono strong' }, f.mt(r.stock_g)),
+    h('td', { class: 'r mono strong' + f.neg(r.stock_g), title: r.short_g ? `${f.qty(r.short_g)} sold short here` : null },
+      f.mt(r.stock_g)),
     h('td', { class: 'r mono' }, r.lots),
     h('td', { class: 'r mono' }, f.perKg(r.cost_paise)),
     h('td', { class: 'r mono' }, f.inr(r.stock_value_paise, { compact: true })),

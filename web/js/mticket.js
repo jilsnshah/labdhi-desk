@@ -39,6 +39,7 @@ export function startTicket(side, opts = {}, appCtx) {
     list: { items: [], total: 0 }, query: '',
     browse: null, pick: { material: null, grade: null },
     editingLot: null,
+    shortOK: false,                   // sell: also offer products / warehouses with no stock (sell short)
     transporter: null,
     terms: { freight_by: '', delivery_by: '', payment_terms: '', eway: '', remarks: '' },
     sauda_no: '', saudaAuto: true,
@@ -151,12 +152,12 @@ async function loadStep(append = false) {
   const my = ++listSeq;
   let page = null;
   if (step === 'who') page = await api.parties({ q: ms.query, limit: 20, offset });
-  else if (step === 'what' && ms.browse === 'material') page = await api.materials({ has_products: true, in_stock: sell, limit: 40, offset });
-  else if (step === 'what' && ms.browse === 'grade') page = await api.grades({ material_id: ms.pick.material.id, has_products: true, in_stock: sell, limit: 40, offset });
-  else if (step === 'what' && ms.browse === 'product') page = await api.products({ grade_id: ms.pick.grade.id, in_stock: sell, limit: 40, offset });
-  else if (step === 'what') page = await api.products({ q: ms.query, in_stock: sell, limit: 20, offset });
+  else if (step === 'what' && ms.browse === 'material') page = await api.materials({ has_products: true, in_stock: sell && !ms.shortOK, limit: 40, offset });
+  else if (step === 'what' && ms.browse === 'grade') page = await api.grades({ material_id: ms.pick.material.id, has_products: true, in_stock: sell && !ms.shortOK, limit: 40, offset });
+  else if (step === 'what' && ms.browse === 'product') page = await api.products({ grade_id: ms.pick.grade.id, in_stock: sell && !ms.shortOK, limit: 40, offset });
+  else if (step === 'what') page = await api.products({ q: ms.query, in_stock: sell && !ms.shortOK, limit: 20, offset });
   else if (step === 'where' && ms.product) {
-    page = sell ? await api.warehouses({ product_id: ms.product.id, in_stock: true, limit: 20, offset })
+    page = sell ? await api.warehouses({ product_id: ms.product.id, in_stock: !ms.shortOK, limit: 20, offset })
                 : await api.warehouses({ q: ms.query, limit: 20, offset });
   }
   if (!ms || !page || my !== listSeq) return;
@@ -178,8 +179,9 @@ async function chooseProduct(id, advanceTo = 1) {
       : (last || pos.mark_paise || 0);
   }
   if (ms.side === 'sell') {
-    const r = await api.warehouses({ product_id: id, in_stock: true, limit: 2 }).catch(() => ({ items: [] }));
-    if (r.items.length === 1) await chooseWarehouse(r.items[0], true);
+    const r = await api.warehouses({ product_id: id, in_stock: !ms.shortOK, limit: 2 }).catch(() => ({ items: [] }));
+    if (r.items.length === 1 && !ms.shortOK) await chooseWarehouse(r.items[0], true);
+    if (!r.items.length) ms.shortOK = true;       // held nowhere: it can only be sold short
   }
   if (!ms) return;
   if (advanceTo) { ms.stepIndex = advanceTo === 2 ? steps().indexOf('what') + 1 : stepIndex(); go(advanceTo === 2 ? 0 : 1); }
@@ -200,6 +202,13 @@ async function chooseWarehouse(w, auto = false) {
 }
 
 const stockHere = () => ms.lots.reduce((s, l) => s + (l.available_g || 0), 0);
+// Past what the warehouse holds, a sale is short: every lot goes in full, the rest is owed.
+const shortHere = () => (ms.side === 'sell' ? Math.max(0, ms.qty_g - stockHere()) : 0);
+const coveredHere = () => ms.qty_g - shortHere();
+function takeEverything() {
+  ms.alloc = {};
+  for (const lot of ms.lots) ms.alloc[lot.id] = lot.available_g;
+}
 
 // --------------------------------------------------------------- allocation
 function flow() {
@@ -210,14 +219,15 @@ function flow() {
   });
   const assigned = rows.reduce((s, r) => s + r.take, 0);
   const cost = rows.reduce((s, r) => s + r.take * r.lot.rate_paise, 0);
-  return { rows, assigned, left: ms.qty_g - assigned,
+  // stock can cover at most what the warehouse holds; the rest of a short sale is owed
+  return { rows, assigned, left: coveredHere() - assigned,
            margin: rows.reduce((s, r) => s + r.margin, 0), avgCost: assigned ? rnd(cost / assigned) : 0 };
 }
 
 // Fill what is still unassigned from the oldest stock, leaving alone any
 // amount he typed himself.
 function autoAssign() {
-  let left = ms.qty_g - Object.values(ms.alloc).reduce((a, b) => a + (b || 0), 0);
+  let left = coveredHere() - Object.values(ms.alloc).reduce((a, b) => a + (b || 0), 0);
   for (const lot of ms.lots.slice().sort((a, b) => String(a.deal_date).localeCompare(b.deal_date) || a.id - b.id)) {
     if (left <= 0) break;
     const already = ms.alloc[lot.id] || 0;
@@ -233,7 +243,7 @@ const openLots = () => ms.lots.filter(l => l.available_g > 0);
 function pins() {
   if (ms.side !== 'sell') return undefined;
   const open = openLots();
-  if (open.length === 1) return [{ lot_id: open[0].id, qty_g: ms.qty_g }];
+  if (open.length === 1) return [{ lot_id: open[0].id, qty_g: Math.min(ms.qty_g, open[0].available_g) }];
   return flow().rows.map(r => ({ lot_id: r.lot.id, qty_g: r.take }));
 }
 
@@ -354,7 +364,9 @@ function stepWhat() {
     h('div', { class: 'mchips g2', style: { paddingTop: 0 } },
       h('button', { class: 'mchip', onclick: () => { ms.browse = 'material'; ms.list = { items: [], total: 0 }; loadStep(); paint(); } },
         'Browse by material'),
-      !sell ? h('button', { class: 'mchip', onclick: addProduct }, '+ New product') : null),
+      !sell ? h('button', { class: 'mchip', onclick: addProduct }, '+ New product') : null,
+      sell && !ms.shortOK ? h('button', { class: 'mchip', onclick: () => { ms.shortOK = true; loadStep(); paint(); } },
+        'Sell short — not in stock') : null),
     ...ms.list.items.map(p => h('button', {
       class: 'mopt', onclick: () => chooseProduct(p.id)
     },
@@ -414,9 +426,12 @@ function stepWhere() {
     },
       h('div', { class: 'mopt-main' }, h('b', {}, w.name), h('span', {}, w.address || '')),
       h('span', { class: 'mopt-tag' + (sell ? ' up' : '') },
-        sell ? f.qty(w.product_stock_g) : (w.id === last ? 'last used' : (w.stock_g ? f.qty(w.stock_g) : 'empty'))))),
+        sell ? (w.product_stock_g > 0 ? f.qty(w.product_stock_g) : 'none · short')
+             : (w.id === last ? 'last used' : (w.stock_g ? f.qty(w.stock_g) : 'empty'))))),
     moreBtn(),
-    sell && !items.length ? h('div', { class: 'mt-hint' }, 'No warehouse holds this product.') : null
+    sell && !items.length ? h('div', { class: 'mt-hint' }, 'No warehouse holds this product.') : null,
+    sell && !ms.shortOK ? h('button', { class: 'mopt ghost', onclick: () => { ms.shortOK = true; loadStep(); } },
+      'Sell short from another warehouse') : null
   ];
 }
 
@@ -424,16 +439,18 @@ function stepWhere() {
 function stepQty() {
   const stock = ms.side === 'sell' ? stockHere() : 0;
   const live = ms.entry !== '' ? Math.round(parseFloat(ms.entry || '0') * MT) : ms.qty_g;
-  const over = stock > 0 && live > stock;
+  const over = ms.side === 'sell' && live > stock;
   const quick = stock
     ? [['25%', Math.round(stock * .25)], ['50%', Math.round(stock * .5)], ['75%', Math.round(stock * .75)], ['All', stock]]
     : [['5 MT', 5 * MT], ['10 MT', 10 * MT], ['20 MT', 20 * MT], ['25 MT', 25 * MT]];
   return [
     h('div', { class: 'mt-q' }, 'How much?'),
-    h('div', { class: 'mt-hint' }, stock ? `${f.qty(stock)} of ${ms.product.display} in ${ms.warehouse.name}` : ms.product.display),
+    h('div', { class: 'mt-hint' }, ms.side === 'sell'
+      ? `${f.qty(stock)} of ${ms.product.display} in ${ms.warehouse.name}${stock ? '' : ' — any sale is short'}`
+      : ms.product.display),
     h('div', { class: 'mnum-value' + (over ? ' warn' : '') },
       h('b', {}, (ms.entry !== '' ? ms.entry : (live / MT || 0).toString()) + ' MT'),
-      h('small', {}, over ? `More than ${ms.warehouse.name} holds — max ${f.qty(stock)}`
+      h('small', {}, over ? `${f.qty(live - stock)} sold short — covered by the next stock into ${ms.warehouse.name}`
         : (live ? `${Math.round(live / 1000).toLocaleString('en-IN')} kg` : 'tap a shortcut or type'))),
     h('div', { class: 'mchips g4' }, ...quick.map(([label, g]) => h('button', {
       class: 'mchip' + (ms.qty_g === g && ms.entry === '' ? ' on' : ''),
@@ -445,7 +462,8 @@ function stepQty() {
 
 function autoIfSingle() {
   const open = openLots();
-  if (open.length === 1) ms.alloc = { [open[0].id]: ms.qty_g };
+  if (shortHere() > 0) takeEverything();
+  else if (open.length === 1) ms.alloc = { [open[0].id]: ms.qty_g };
 }
 
 // --------------------------------------------------------------- rate
@@ -456,7 +474,7 @@ function stepRate() {
   const paise = live || 0;
   const cost = ms.side === 'sell' ? sellCost() : 0;
   const marginRate = cost && paise ? paise - cost : 0;
-  const margin = valuePaise(ms.qty_g, marginRate);
+  const margin = valuePaise(coveredHere(), marginRate);
   const good = marginRate >= 0;
   const shown = typedNow ? (ms.entry || '0') : f.perKg(ms.rate_paise);
   return [
@@ -467,7 +485,8 @@ function stepRate() {
           h('div', { class: 'mlive-top' },
             h('b', { class: 'num ' + (good ? 'up' : 'down') }, f.inr(margin, { sign: true })),
             h('span', { class: 'num ' + (good ? 'up' : 'down') }, f.rateDelta(marginRate) + '/kg')),
-          h('div', { class: 'mlive-sub' }, `your cost ${f.rate(cost)}/kg · sale value ${f.inr(valuePaise(ms.qty_g, paise))}`))
+          h('div', { class: 'mlive-sub' }, `your cost ${f.rate(cost)}/kg · sale value ${f.inr(valuePaise(ms.qty_g, paise))}` +
+            (shortHere() ? ` · margin on ${f.qty(coveredHere())}, ${f.qty(shortHere())} short` : '')))
       : (paise ? h('div', { class: 'mlive' },
           h('div', { class: 'mlive-top' }, h('b', { class: 'num' }, f.inr(valuePaise(ms.qty_g, paise)))),
           h('div', { class: 'mlive-sub' }, 'total value of this purchase')) : null),
@@ -533,7 +552,7 @@ function stepSplit() {
 
 function lotRoom(lot) {
   const others = flow().assigned - (ms.alloc[lot.id] || 0);
-  return Math.min(lot.available_g, ms.qty_g - others);
+  return Math.min(lot.available_g, coveredHere() - others);
 }
 
 // Typing past what the lot holds, or past what the sale still needs, is shown
@@ -573,7 +592,8 @@ function stepReview() {
   const sell = ms.side === 'sell';
   const cost = sell ? sellCost() : 0;
   const marginRate = cost ? ms.rate_paise - cost : 0;
-  const margin = valuePaise(ms.qty_g, marginRate);
+  const margin = valuePaise(coveredHere(), marginRate);
+  const short = shortHere();
   return [
     h('div', { class: 'mt-q' }, ms.edit ? 'Change what you need' : (sell ? 'Confirm the sale' : 'Confirm the purchase')),
     h('div', { class: 'mt-hint' }, ms.edit ? 'Tap a row to change it. You see every change before it is saved.'
@@ -584,6 +604,7 @@ function stepReview() {
       row('Product', ms.product.display, () => jump('what')),
       row(sell ? 'Dispatch from' : 'Receive into', ms.warehouse.name, () => jump('where')),
       row('Quantity', f.qty(ms.qty_g), () => jump('qty')),
+      short ? row('Sold short', `${f.qty(short)} — ${ms.warehouse.name} goes to −${f.qty(short)}`, () => jump('qty')) : null,
       row('Rate', f.rate(ms.rate_paise) + '/kg', () => jump('rate')),
       ms.edit && sell && openLots().length > 1 ? row('Lots', splitSummary(), () => jump('split')) : null,
       row('GST', ms.plus_gst ? 'Extra' : 'Included', () => { ms.plus_gst = !ms.plus_gst; paint(); }),
@@ -596,8 +617,11 @@ function stepReview() {
           h('div', { class: 'mlive-top' },
             h('b', { class: 'num ' + (margin >= 0 ? 'up' : 'down') }, f.inr(margin, { sign: true })),
             h('span', { class: 'num ' + (margin >= 0 ? 'up' : 'down') }, f.rateDelta(marginRate) + '/kg')),
-          h('div', { class: 'mlive-sub' }, `bought at ${f.rate(cost)}/kg, selling at ${f.rate(ms.rate_paise)}/kg`))
+          h('div', { class: 'mlive-sub' }, `bought at ${f.rate(cost)}/kg, selling at ${f.rate(ms.rate_paise)}/kg` +
+            (short ? ` · on ${f.qty(coveredHere())} covered` : '')))
       : null,
+    short ? h('div', { class: 'need short' }, `${f.qty(short)} is sold short. The next ${ms.product.display} bought or ` +
+      `moved into ${ms.warehouse.name} covers it first; its margin is known then.`) : null,
     ms.error ? h('div', { class: 'need' }, ms.error) : null
   ];
 }
@@ -722,8 +746,9 @@ function foot(step) {
   return h('div', { class: 'mt-foot' },
     h('button', { class: 'mt-next', disabled: !(value > 0), onclick: () => {
       if (step === 'qty') {
-        const stock = ms.side === 'sell' ? stockHere() : 0;
-        ms.qty_g = stock ? Math.min(value, stock) : value;
+        const wasShort = shortHere() > 0;
+        ms.qty_g = value;
+        if (wasShort && !shortHere()) ms.alloc = {};    // every lot was full; the split starts again
         autoIfSingle();
       } else ms.rate_paise = value;
       next();
@@ -776,6 +801,7 @@ async function book() {
       eway: ms.terms.eway || undefined,
       remarks: ms.terms.remarks || undefined,
       pins: pins(),
+      allow_short: shortHere() > 0,
       confirm: true
     });
     done(sell, deal);

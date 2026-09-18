@@ -97,7 +97,7 @@ export function renderMobileDesk(root, s, appCtx) {
         h('div', { class: 'mpos-name' }, p.product),
         h('div', { class: 'mpos-sub' }, p.warehouses.map(w => `${w.name} ${f.qty(w.stock_g, { short: true })}`).join(' · '))),
       h('div', { class: 'mpos-qty', onclick: () => ctx.go('position', p.product_id) },
-        h('b', { class: 'num' }, f.qty(p.stock_g)),
+        h('b', { class: 'num' + f.neg(p.stock_g) }, f.qty(p.stock_g)),
         h('span', { class: 'num ' + (p.unrealised_paise >= 0 ? 'up' : 'down') },
           f.inr(p.unrealised_paise, { sign: true, compact: true }))),
       h('button', { class: 'mpos-go', title: 'Sell',
@@ -128,7 +128,7 @@ export async function renderMobileStock(root, appCtx) {
       h('div', { class: 'mflow-head' },
         h('div', { class: 'grow' }, h('b', {}, `${r.material} ${r.grade} · ${r.manufacturer}`),
           h('span', {}, `${r.warehouse} · ${r.lots} lot${r.lots === 1 ? '' : 's'} · cost ${f.rate(r.cost_paise)}`)),
-        h('div', { class: 'mflow-money' }, h('b', { class: 'num' }, f.qty(r.stock_g)),
+        h('div', { class: 'mflow-money' }, h('b', { class: 'num' + f.neg(r.stock_g) }, r.short_g ? `${f.qty(r.stock_g)} short` : f.qty(r.stock_g)),
           h('span', {}, f.inr(r.stock_value_paise, { compact: true }))))),
     empty: () => h('div', { class: 'empty' }, h('h3', {}, 'Nothing in stock here'))
   });
@@ -142,7 +142,7 @@ export async function renderMobileStock(root, appCtx) {
         ...whs.items.map(w => h('button', {
           class: 'mwh' + (String(st.warehouse_id) === String(w.id) ? ' on' : ''),
           onclick: () => { st.warehouse_id = w.id; renderMobileStock(root, ctx); }
-        }, h('b', {}, w.name), h('span', {}, f.qty(w.stock_g)))),
+        }, h('b', {}, w.name), h('span', { class: f.neg(w.stock_g) }, f.qty(w.stock_g)))),
         h('button', { class: 'mwh add', onclick: async () => { if (await warehouseForm()) renderMobileStock(root, ctx); } },
           h('b', {}, '+'), h('span', {}, 'warehouse'))),
       msearch('Product, grade or maker', q => { st.q = q; reload(); }, st.q)),
@@ -217,13 +217,20 @@ export async function renderMobilePosition(root, productId, appCtx) {
       h('div', { class: 'mpos-hero' },
         h('b', {}, p.product.display),
         h('div', { class: 'mpos-hero-row' },
-          heroStat('In stock', f.qty(p.stock_g)), heroStat('Avg cost', f.rate(p.cost_paise)),
+          heroStat('In stock', f.qty(p.stock_g), p.stock_g < 0 ? 'down' : ''), heroStat('Avg cost', f.rate(p.cost_paise)),
           heroStat('Mark', p.mark_paise ? f.rate(p.mark_paise) : '—'),
           heroStat('Open P&L', f.inr(p.unrealised_paise, { sign: true, compact: true }), p.unrealised_paise >= 0 ? 'up' : 'down')),
         p.warehouses.length ? h('div', { class: 'mdeal-meta' },
           ...p.warehouses.map(w => h('span', {}, `${w.name} ${f.qty(w.stock_g)}`))) : null),
-      open.length ? h('button', { class: 'dock-btn sell', style: { marginTop: '12px', width: '100%' },
-        onclick: () => ctx.trade('sell', { product: { id: productId, display: p.product.display } }) }, '↑ Sell this product') : null),
+      h('button', { class: 'dock-btn sell', style: { marginTop: '12px', width: '100%' },
+        onclick: () => ctx.trade('sell', { product: { id: productId, display: p.product.display } }) }, '↑ Sell this product')),
+    p.shorts.length ? h('div', { class: 'mflow' }, label('Sold short', h('span', { class: 'neg' }, f.qty(p.short_g))),
+      h('div', { class: 'mt-hint' }, 'Covered by the next stock bought or moved into that warehouse, oldest first.'),
+      ...p.shorts.map(s => h('div', { class: 'mflow-card' },
+        h('div', { class: 'mflow-head' },
+          h('div', { class: 'grow' }, h('b', {}, s.party_name), h('span', {}, `${s.ref} · ${s.warehouse} · sold @ ${f.rate(s.rate_paise)}`)),
+          h('div', { class: 'mflow-money' }, h('b', { class: 'num neg' }, `−${f.qty(s.uncovered_g)}`),
+            h('span', {}, p.mark_paise ? `est. ${f.inr(Math.round(s.uncovered_g * (s.rate_paise - p.mark_paise) / 1000), { sign: true })}` : 'owed')))))) : null,
     h('div', { class: 'mflow' }, label('Lots', h('span', {}, `${open.length} open`)),
       ...p.lots.map(l => {
         const card = lotCard({ ...l, product: p.product.display }, after);
@@ -293,7 +300,9 @@ function dealCard(d, reload) {
       cell('Warehouse', d.warehouse),
       cell('Delivery', d.delivery_by)),
     sell ? h('div', { class: 'mdeal-margin ' + (d.margin_paise >= 0 ? 'up' : 'down') },
-      `margin ${f.inr(d.margin_paise, { sign: true, compact: true })}`) : null);
+      `margin ${f.inr(d.margin_paise, { sign: true, compact: true })}`,
+      d.status === 'booked' && d.uncovered_g ? h('span', { class: 'short-tag', style: { marginLeft: '8px' } },
+        `${f.qty(d.uncovered_g, { short: true })} sold short`) : null) : null);
 
   let open = null;
   card.onclick = async e => {
@@ -323,7 +332,9 @@ function dealCard(d, reload) {
         })),
         { qty: full.qty_g, short: `${full.party_name} · ${f.qty(full.qty_g)}` },
         { targetColor: sell ? 'var(--up)' : 'var(--accent)' }) : h('div', { class: 'mflow-empty' },
-          sell ? 'Nothing allocated.' : 'None of this purchase sold yet.'),
+          sell ? (full.short_g ? `All ${f.qty(full.short_g)} sold short — not covered by stock yet.` : 'Nothing allocated.')
+               : 'None of this purchase sold yet.'),
+      sell && full.short_g && lines.length ? h('div', { class: 'mflow-empty neg' }, `${f.qty(full.short_g)} sold short — covered by the next stock into ${full.warehouse}.`) : null,
       full.status === 'booked' ? h('button', {
         class: 'mmore wa', style: { marginTop: '10px' },
         onclick: () => sendSauda(full, (ctx.boot && ctx.boot.settings && ctx.boot.settings.company_name))

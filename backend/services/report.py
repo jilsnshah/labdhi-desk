@@ -24,6 +24,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from .. import db
+from .stock import _CELLS
 
 # ------------------------------------------------------------------ styling
 INK, MUTED, LINE = "16181C", "5B6170", "D9DBD4"
@@ -317,15 +318,20 @@ def flow_workbook(date_from: Optional[str] = None, date_to: Optional[str] = None
         value = _money(s["qty_g"], s["rate_paise"])
         sources = "; ".join("%s %s MT @ ₹%.2f (%s)" % (buy_by_id[f["buy_deal_id"]]["party_name"], _fmt_mt(f["qty_g"]),
                                                       f["cost_paise"] / 100, buy_by_id[f["buy_deal_id"]]["ref"]) for f in fs)
-        margin = round(value - cost, 2)
+        if s["uncovered_g"]:
+            sources += "%s%s MT sold short, not covered yet" % ("; " if sources else "", _fmt_mt(s["uncovered_g"]))
+        # margin is known only on what stock covers; a short part has no cost yet
+        covered_g = s["qty_g"] - s["uncovered_g"]
+        margin = round(sum(_money(f["qty_g"], f["sale_rate_paise"] - f["cost_paise"]) for f in fs), 2)
         rows.append([
             _d(s["deal_date"]), s["ref"], s["party_name"], s["party_gstin"] or "", s["product"],
             s["warehouse"] or "", _kg(s["qty_g"]), _mt(s["qty_g"]), _r(s["rate_paise"]),
             "GST extra" if s["plus_gst"] else "incl. GST", value,
-            round(cost / _kg(s["qty_g"]), 2) if s["qty_g"] else None, cost, margin,
-            round(margin / _kg(s["qty_g"]), 2) if s["qty_g"] else None, (margin / cost) if cost else None,
+            round(cost / _kg(covered_g), 2) if covered_g else None, cost, margin,
+            round(margin / _kg(covered_g), 2) if covered_g else None, (margin / cost) if cost else None,
             sources, s["payment_terms"] or "", _d(s["payment_due"]), s["transporter_name"] or "",
             s["delivery_by"] or "", s["freight_by"] or "", s["ex_place"] or "", s["eway"] or "", s["remarks"] or "",
+            _kg(s["uncovered_g"]) if s["uncovered_g"] else None,
         ])
     cols = [("Date", 12, DATE), ("Sauda No.", 16, None), ("Buyer", 28, None), ("Buyer GSTIN", 17, None),
             ("Product", 30, None), ("Dispatched from", 13, None), ("Qty (kg)", 12, KG), ("Qty (MT)", 10, MT),
@@ -334,9 +340,9 @@ def flow_workbook(date_from: Optional[str] = None, date_to: Optional[str] = None
             ("Margin ₹/kg", 12, MARGIN_RATE), ("Margin %", 10, PCT), ("Material came from", 55, None),
             ("Payment terms", 13, None), ("Payment due", 12, DATE), ("Transporter", 18, None),
             ("Transport arranged by", 12, None), ("Freight paid by", 11, None), ("Ex-Place", 12, None),
-            ("E-way bill", 14, None), ("Note", 24, None)]
+            ("E-way bill", 14, None), ("Note", 24, None), ("Sold short, not covered (kg)", 14, KG)]
     table(ws, 4, cols, rows, totals={"Qty (kg)": "sum", "Qty (MT)": "sum", "Sale value ₹": "sum",
-                                     "Cost value ₹": "sum", "Margin ₹": "sum",
+                                     "Cost value ₹": "sum", "Margin ₹": "sum", "Sold short, not covered (kg)": "sum",
                                      "Margin %": lambda a, z: "=IFERROR(N%d/M%d,0)" % (z + 1, z + 1)})
 
     # ================================================================ Purchases
@@ -394,15 +400,19 @@ def flow_workbook(date_from: Optional[str] = None, date_to: Optional[str] = None
     sold_g = sum(s["qty_g"] for s in sales)
     sale_value = sum(_money(s["qty_g"], s["rate_paise"]) for s in sales)
     cost_value = sum(_money(f["qty_g"], f["cost_paise"]) for f in flows)
+    margin_value = round(sum(_money(f["qty_g"], f["sale_rate_paise"] - f["cost_paise"]) for f in flows), 2)
+    covered_g = sum(f["qty_g"] for f in flows)
+    short_g = sum(s["uncovered_g"] for s in sales)
     bought_g = sum(b["qty_g"] for b in in_window)
     bought_value = sum(_money(b["qty_g"], b["rate_paise"]) for b in in_window)
     kpis = [
         ("Purchases in period", len(in_window), '0'), ("Bought (MT)", _mt(bought_g), MT), ("Purchase value", bought_value, MONEY),
         ("Sales in period", len(sales), '0'), ("Sold (MT)", _mt(sold_g), MT), ("Sale value", sale_value, MONEY),
-        ("Cost of material sold", cost_value, MONEY), ("Margin", round(sale_value - cost_value, 2), MONEY),
-        ("Margin %", ((sale_value - cost_value) / cost_value) if cost_value else 0, PCT),
-        ("Avg margin ₹/kg", round((sale_value - cost_value) / _kg(sold_g), 2) if sold_g else 0, MARGIN_RATE),
+        ("Cost of material sold", cost_value, MONEY), ("Margin", margin_value, MONEY),
+        ("Margin %", (margin_value / cost_value) if cost_value else 0, PCT),
+        ("Avg margin ₹/kg", round(margin_value / _kg(covered_g), 2) if covered_g else 0, MARGIN_RATE),
         ("Suppliers", len({b["party_id"] for b in in_window}), '0'), ("Buyers", len({s["party_id"] for s in sales}), '0'),
+        ("Sold short, not covered (MT)", _mt(short_g), MT),
     ]
     r0 = 5
     for i, (name, value, fmt) in enumerate(kpis):
@@ -423,20 +433,22 @@ def flow_workbook(date_from: Optional[str] = None, date_to: Optional[str] = None
         p = per[s["product"]]
         p["sold_g"] += s["qty_g"]; p["sold_v"] += _money(s["qty_g"], s["rate_paise"]); p["buyers"].add(s["party_name"])
     for f in flows:
-        per[sale_by_id[f["sale_deal_id"]]["product"]]["cost_v"] += _money(f["qty_g"], f["cost_paise"])
+        p = per[sale_by_id[f["sale_deal_id"]]["product"]]
+        p["cost_v"] += _money(f["qty_g"], f["cost_paise"])
+        p["margin_v"] = p.get("margin_v", 0.0) + _money(f["qty_g"], f["sale_rate_paise"] - f["cost_paise"])
     stock_now = {r["display"]: r["g"] for r in db.q(
-        """SELECT s.display, SUM(l.qty_g - l.qty_allocated_g - l.qty_out_g) AS g FROM lots l
-           JOIN v_products s ON s.id = l.product_id WHERE l.status = 'open' GROUP BY s.display""")}
+        """SELECT s.display, SUM(c.free_g) - SUM(c.short_g) AS g FROM (%s) c
+           JOIN v_products s ON s.id = c.product_id GROUP BY s.display""" % _CELLS)}
     rows = []
     for name in sorted(per):
         p = per[name]
-        margin = round(p["sold_v"] - p["cost_v"], 2)
+        margin = round(p.get("margin_v", 0.0), 2)
         rows.append([name, _mt(p["bought_g"]), round(p["bought_v"] / _kg(p["bought_g"]), 2) if p["bought_g"] else None,
                      round(p["bought_v"], 2), _mt(p["sold_g"]),
                      round(p["sold_v"] / _kg(p["sold_g"]), 2) if p["sold_g"] else None, round(p["sold_v"], 2),
                      round(p["cost_v"], 2), margin, (margin / p["cost_v"]) if p["cost_v"] else None,
                      _mt(stock_now.get(name, 0)), ", ".join(sorted(p["suppliers"])), ", ".join(sorted(p["buyers"]))])
-    top = r0 + 9
+    top = r0 + -(-len(kpis) // 3) * 2 + 1          # below the last row of KPI tiles
     ws.cell(row=top - 1, column=1, value="By product").font = Font(bold=True, size=12, color=INK)
     cols = [("Product", 32, None), ("Bought (MT)", 11, MT), ("Avg buy ₹/kg", 12, RATE), ("Purchase value ₹", 15, MONEY),
             ("Sold (MT)", 11, MT), ("Avg sale ₹/kg", 12, RATE), ("Sale value ₹", 15, MONEY),
@@ -528,10 +540,17 @@ def tape_workbook(**filters) -> bytes:
     company = db.settings().get("company_name") or "Labdhi Exim"
 
     def money(d):
+        """Value of the whole sauda; for a sale, cost and margin of what stock covers so far -
+        a part sold short has no cost until a purchase covers it."""
         value = _money(d["qty_g"], d["rate_paise"])
-        margin = round(d["margin_paise"] / 100.0, 2) if d["side"] == "sell" else None
-        cost = round(value - margin, 2) if margin is not None else None
-        return value, cost, margin
+        if d["side"] != "sell":
+            return value, None, None
+        margin = round(d["margin_paise"] / 100.0, 2)
+        covered = _money(d["qty_g"] - covered_short(d), d["rate_paise"])
+        return value, round(covered - margin, 2), margin
+
+    def covered_short(d):
+        return d["uncovered_g"] if d["status"] == "booked" else 0
 
     def due_status(d):
         due = _d(d["payment_due"])
@@ -582,7 +601,8 @@ def tape_workbook(**filters) -> bytes:
             ("Sold so far (kg)", 12, KG), ("Still in stock (kg)", 12, KG),
             ("Payment terms", 13, None), ("Payment due", 12, DATE), ("Payment status", 16, None),
             ("Transporter", 18, None), ("Transport arranged by", 12, None), ("Freight paid by", 11, None),
-            ("Ex-Place", 12, None), ("E-way bill", 14, None), ("Note", 26, None)]
+            ("Ex-Place", 12, None), ("E-way bill", 14, None), ("Note", 26, None),
+            ("Sold short, not covered (kg)", 14, KG)]
     data, sides = [], []
     for d in booked:
         value, cost, margin = money(d)
@@ -593,13 +613,15 @@ def tape_workbook(**filters) -> bytes:
             state(d), phone(d), d["material"], d["grade"], d["manufacturer"], d["warehouse"] or "",
             _kg(d["qty_g"]), _mt(d["qty_g"]), _r(d["rate_paise"]), "GST extra" if d["plus_gst"] else "incl. GST",
             value, None if sell else value, value if sell else None, cost, margin,
-            round(margin / _kg(d["qty_g"]), 2) if sell and d["qty_g"] else None,
+            round(margin / _kg(d["qty_g"] - d["uncovered_g"]), 2) if sell and d["qty_g"] > d["uncovered_g"] else None,
             (margin / cost) if sell and cost else None,
-            "; ".join(sources[d["id"]]) if sell else "",
+            "; ".join(sources[d["id"]] + (["%s MT sold short, not covered yet" % _fmt_mt(d["uncovered_g"])]
+                                          if d["uncovered_g"] else [])) if sell else "",
             None if sell else _kg(d["sold_g"]), None if sell else _kg(left[d["id"]]),
             d["payment_terms"] or "", _d(d["payment_due"]), status,
             d["transporter_name"] or "", d["delivery_by"] or "", d["freight_by"] or "",
-            d["ex_place"] or "", d["eway"] or "", d["remarks"] or ""])
+            d["ex_place"] or "", d["eway"] or "", d["remarks"] or "",
+            _kg(d["uncovered_g"]) if sell and d["uncovered_g"] else None])
         sides.append(d["side"])
     buys_went = {}
     if buy_ids:
@@ -614,7 +636,7 @@ def tape_workbook(**filters) -> bytes:
     m, c = _col(cols, "Margin ₹"), _col(cols, "Cost of sold ₹")
     _table(ws, 4, cols, data, totals={
         "Qty (kg)": "sum", "Qty (MT)": "sum", "Buy value ₹": "sum", "Sale value ₹": "sum",
-        "Cost of sold ₹": "sum", "Margin ₹": "sum",
+        "Cost of sold ₹": "sum", "Margin ₹": "sum", "Sold short, not covered (kg)": "sum",
         "Margin %": lambda a, z: "=IFERROR(%s%d/%s%d,0)" % (m, z + 1, c, z + 1)},
         group_fill=lambda i: sell_fill if sides[i] == "sell" else buy_fill, freeze_col=5)
     if not data:
@@ -689,7 +711,7 @@ def tape_workbook(**filters) -> bytes:
         else:
             p["ns"] += 1; p["sg"] += d["qty_g"]; p["sv"] += value; p["margin"] += margin; p["cost"] += cost
     stock_now = {r["product_id"]: r["g"] for r in db.q(
-        "SELECT product_id, SUM(qty_g - qty_allocated_g - qty_out_g) AS g FROM lots WHERE status='open' GROUP BY product_id")}
+        "SELECT c.product_id, SUM(c.free_g) - SUM(c.short_g) AS g FROM (%s) c GROUP BY c.product_id" % _CELLS)}
     data = []
     for pid_, p in sorted(per.items(), key=lambda kv: kv[1]["d"]["product"]):
         d = p["d"]
@@ -753,7 +775,7 @@ def tape_workbook(**filters) -> bytes:
     bv = sum(_money(d["qty_g"], d["rate_paise"]) for d in buys)
     sv = sum(_money(d["qty_g"], d["rate_paise"]) for d in sells)
     margin = sum(money(d)[2] for d in sells)
-    cost = sv - margin
+    cost = sum(money(d)[1] for d in sells)
     sold_g = sum(d["qty_g"] for d in sells)
     overdue = [d for d in booked if (due_status(d)[0] or 0) < 0]
     recv_over = sum(_money(d["qty_g"], d["rate_paise"]) for d in overdue if d["side"] == "sell")

@@ -92,7 +92,8 @@ function dealRow(d, ctx, reload) {
     h('td', {}, h('span', { class: 'pill ' + d.status }, f.statusLabel(d.status))),
     h('td', {}, d.delivery_by || h('span', { class: 'dim' }, '—')),
     h('td', { class: 'r mono' }, sell
-      ? h('b', { class: pnlClass(d.margin_paise) }, f.inr(d.margin_paise, { sign: true, compact: true }))
+      ? [h('b', { class: pnlClass(d.margin_paise) }, f.inr(d.margin_paise, { sign: true, compact: true })),
+         d.status === 'booked' && d.uncovered_g ? h('div', {}, h('span', { class: 'short-tag' }, `${f.qty(d.uncovered_g, { short: true })} short`)) : null]
       : h('span', { class: 'dim' }, d.sold_g ? `${f.mt(d.sold_g)} sold` : '—')));
   tr.addEventListener('click', async () => {
     if (open) { open.remove(); open = null; tr.classList.remove('open'); return; }
@@ -131,7 +132,10 @@ export function dealDetail(deal, ctx, reload) {
       fact('Payment terms', deal.payment_terms),
       fact('E-way bill', deal.eway),
       fact('Note', deal.remarks),
-      sell ? fact('Margin', f.inr(deal.margin_paise, { sign: true })) : fact('Sold so far', f.qty(deal.sold_g))),
+      sell ? fact('Margin', f.inr(deal.margin_paise, { sign: true }) + (deal.short_g ? ` on ${f.qty(deal.qty_g - deal.short_g)} covered` : ''))
+           : fact('Sold so far', f.qty(deal.sold_g)),
+      sell && deal.short_g ? fact('Sold short', `${f.qty(deal.short_g)} — covered by the next stock into ${deal.warehouse}` +
+        (deal.short_est_paise !== null ? ` · est. ${f.inr(deal.short_est_paise, { sign: true })} at mark` : '')) : null),
 
     h('div', { class: 'lineage' },
       h('div', { class: 'lineage-title' }, sell ? 'Drawn from' : 'Went to'),
@@ -145,7 +149,11 @@ export function dealDetail(deal, ctx, reload) {
           : `sold ${f.rate(a.sale_rate_paise)} · ${a.sale_ref} · ${a.warehouse}`),
         h('span', { class: 'grow' }),
         h('b', { class: 'num ' + pnlClass(a.margin_paise) }, f.inr(a.margin_paise, { sign: true })))),
-      !lines.length ? h('div', { class: 'dim' },
+      sell && deal.short_g ? h('div', { class: 'lin' },
+        h('i', { class: 'pipe', style: { background: 'var(--down)' } }),
+        h('b', { class: 'neg' }, f.qty(deal.short_g)), h('span', { class: 'muted' }, '←'),
+        h('b', {}, 'sold short'), h('span', { class: 'dim' }, 'not covered by stock yet')) : null,
+      !lines.length && !(sell && deal.short_g) ? h('div', { class: 'dim' },
         sell ? 'No stock was allocated.' : 'None of this purchase has been sold yet.') : null),
 
     h('div', { class: 'chips', style: { marginTop: '14px' } },
@@ -184,10 +192,12 @@ export async function renderPosition(root, productId, ctx) {
   mount(root, h('div', { class: 'view' },
     h('div', { class: 'chips', style: { marginBottom: '14px' } },
       h('button', { class: 'chip', onclick: () => ctx.go('desk') }, '← Desk'),
-      open.length ? h('button', { class: 'chip on', onclick: () => ctx.sell({ product_id: productId, product: p.product.display }) },
-        'Sell this product') : null),
+      h('button', { class: 'chip on', onclick: () => ctx.sell({ product_id: productId, product: p.product.display }) },
+        'Sell this product')),
     h('div', { class: 'pnl-row' },
-      stat('In stock', f.qty(p.stock_g), `${open.length} open lots · ${p.warehouses.length} warehouse${p.warehouses.length === 1 ? '' : 's'}`, 'var(--ink)'),
+      stat('In stock', f.qty(p.stock_g), p.short_g ? `${f.qty(p.short_g)} sold short · ${open.length} open lots`
+        : `${open.length} open lots · ${p.warehouses.length} warehouse${p.warehouses.length === 1 ? '' : 's'}`,
+        p.stock_g < 0 ? 'var(--down)' : 'var(--ink)'),
       stat('Weighted cost', f.rate(p.cost_paise), f.inr(p.stock_value_paise, { compact: true }) + ' tied up', 'var(--ink)'),
       stat('Mark', p.mark_paise ? f.rate(p.mark_paise) : '—', p.mark_source || 'tap to set', 'var(--accent)', async () => {
         const v = prompt('Current market rate, ₹ per kg', p.mark_paise ? f.perKgPlain(p.mark_paise) : '');
@@ -202,7 +212,16 @@ export async function renderPosition(root, productId, ctx) {
 
     h('div', { class: 'section-head' }, h('h2', {}, p.product.display), h('i', { class: 'rule' })),
     p.warehouses.length ? whTags(p.warehouses, 12) : null,
-    pos.lots.length ? ladder(pos, { height: 46 }) : h('div', { class: 'dim' }, 'Flat — nothing in stock.'),
+    pos.lots.length ? ladder(pos, { height: 46 }) : h('div', { class: 'dim' }, p.short_g ? 'Nothing in stock.' : 'Flat — nothing in stock.'),
+    p.shorts.length ? h('div', { class: 'lineage', style: { marginTop: '16px' } },
+      h('div', { class: 'lineage-title' }, 'Sold short — covered by the next stock into that warehouse, oldest first'),
+      ...p.shorts.map(s => h('div', { class: 'lin' },
+        h('i', { class: 'pipe', style: { background: 'var(--down)' } }),
+        h('b', { class: 'neg' }, f.qty(s.uncovered_g)), h('span', { class: 'muted' }, 'owed to'), h('b', {}, s.party_name),
+        h('span', { class: 'dim num' }, `${s.ref} · ${f.date(s.deal_date)} · ${s.warehouse} · sold @ ${f.rate(s.rate_paise)}`),
+        h('span', { class: 'grow' }),
+        p.mark_paise ? h('span', { class: 'num ' + pnlClass(s.rate_paise - p.mark_paise) },
+          `est. ${f.inr(Math.round(s.uncovered_g * (s.rate_paise - p.mark_paise) / 1000), { sign: true })} at mark`) : null))) : null,
 
     h('div', { class: 'section-head', style: { marginTop: '22px' } },
       h('h2', {}, 'Every lot, where it sits, and where it went'), h('i', { class: 'rule' })),

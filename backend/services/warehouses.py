@@ -42,7 +42,11 @@ def list_warehouses(q: str = "", product_id: Optional[int] = None, in_stock: boo
         """SELECT * FROM (
              SELECT w.*,
                     COALESCE((SELECT SUM({a}) FROM lots l WHERE l.warehouse_id = w.id
-                              AND l.status = 'open'), 0) AS stock_g,
+                              AND l.status = 'open'), 0)
+                    - COALESCE((SELECT SUM(d.uncovered_g) FROM deals d WHERE d.warehouse_id = w.id
+                                AND d.side = 'sell' AND d.status = 'booked'), 0) AS stock_g,
+                    COALESCE((SELECT SUM(d.uncovered_g) FROM deals d WHERE d.warehouse_id = w.id
+                              AND d.side = 'sell' AND d.status = 'booked'), 0) AS short_g,
                     COALESCE((SELECT SUM({a} * l.rate_paise) FROM lots l WHERE l.warehouse_id = w.id
                               AND l.status = 'open'), 0) AS cost_gp,
                     (SELECT COUNT(*) FROM lots l WHERE l.warehouse_id = w.id

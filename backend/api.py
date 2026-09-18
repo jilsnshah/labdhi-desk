@@ -481,12 +481,14 @@ class EditIn(BaseModel):
     eway: Optional[str] = None
     remarks: Optional[str] = None
     pins: Optional[List[Dict[str, int]]] = None
-    rehome: bool = False
+    rehome: bool = False          # move sales off this purchase onto other stock (the rest go short)
+    allow_short: bool = False     # the sale may be sold short
 
 
 def _edit_args(body: EditIn):
     changes = body.dict(exclude_unset=True)
     rehome = bool(changes.pop("rehome", False))
+    changes["allow_short"] = bool(changes.pop("allow_short", False))
     for k in ("party_id", "product_id", "warehouse_id", "qty_g", "rate_paise", "plus_gst", "deal_date"):
         if k in changes and changes[k] is None:
             changes.pop(k)
@@ -496,14 +498,16 @@ def _edit_args(body: EditIn):
 @app.post("/api/deals/{deal_id}/edit")
 def edit(deal_id: int, body: EditIn) -> Dict[str, Any]:
     changes, rehome = _edit_args(body)
-    return revise.edit_deal(deal_id, changes, rehome=rehome)
+    allow_short = changes.pop("allow_short")
+    return revise.edit_deal(deal_id, changes, rehome=rehome, allow_short=allow_short)
 
 
 @app.post("/api/deals/{deal_id}/edit/preview")
 def edit_preview(deal_id: int, body: EditIn) -> Dict[str, Any]:
     """The edit, run and rolled back: what would change, sale by sale."""
     changes, rehome = _edit_args(body)
-    return revise.preview_edit(deal_id, changes, rehome=rehome)
+    allow_short = changes.pop("allow_short")
+    return revise.preview_edit(deal_id, changes, rehome=rehome, allow_short=allow_short)
 
 
 @app.post("/api/preview/sell")

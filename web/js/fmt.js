@@ -4,6 +4,8 @@
 export const KG = 1000, TON = 1e6, RUPEE = 100;
 
 export const kg = g => (g || 0) / KG;
+// stock below zero is sold short: shown in red wherever stock is shown
+export const neg = g => ((g || 0) < 0 ? ' neg' : '');
 
 export function qty(g, opts = {}) {
   const t = (g || 0) / TON;

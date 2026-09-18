@@ -825,3 +825,13 @@ body:has(.wa-card) #toasts{top:calc(12px + env(safe-area-inset-top,0px));bottom:
   .rv-line{flex-wrap:wrap}
   .rv-ab{text-align:left}
 }
+
+/* ---- selling short: owed stock is always shown, in red */
+.short-note{margin-top:14px;padding:11px 14px;border-radius:11px;background:#fdecea;border:1px solid #f3c4bf;color:#9b1c14;
+  font-size:14px;font-weight:600}
+.short-note:empty{display:none}
+.rv-short{display:block;font-style:normal;font-size:12.5px;font-weight:700;color:var(--down)}
+.rv-short.ok{color:var(--up)}
+.rv-note.short{background:#fdecea;border-color:#f3c4bf;color:#9b1c14}
+.num.neg,.neg{color:var(--down)}
+.short-tag{display:inline-block;padding:2px 8px;border-radius:999px;background:#fdecea;color:#9b1c14;font-size:12px;font-weight:700}

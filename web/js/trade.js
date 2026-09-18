@@ -9,6 +9,10 @@
 // are offered, the quantity is capped at what is there, and every lot starts at
 // zero - the trader types what comes out of each and watches one number, what
 // is still unplaced. Book only unlocks when that number is exactly zero.
+//
+// Selling more than the warehouse holds is a short sale: every lot there is
+// taken in full and the rest is owed, covered by the next stock that arrives
+// in that warehouse. It is shown in red before booking, never implied.
 
 import { h, mount, toast, celebrate, costTint, pnlClass, debounce } from './ui.js';
 import * as f from './fmt.js';
@@ -48,6 +52,7 @@ export function startTrade(side, opts = {}, appCtx = {}) {
     transporter: null,
     terms: { freight_by: '', delivery_by: '', payment_terms: '', eway: '', remarks: '' },
     busy: false, error: '',
+    shortOK: false,                   // sell: also offer products / warehouses with no stock (sell short)
     termsOpen: false,
     sauda_no: '', saudaAuto: true,
     plus_gst: true, payment_due: '', ex_place: '',
@@ -106,13 +111,16 @@ async function loadParties(append = false) {
 }
 const partyTyped = debounce(() => loadParties(), 200);
 
+// a sale lists what is in stock, unless the trader chose to sell short
+const stockOnly = () => state.side === 'sell' && !state.shortOK;
+
 async function loadLevels() {
   const sell = state.side === 'sell';
   const { material, grade } = state.pick;
   const [m, g, p] = await Promise.all([
-    api.materials({ has_products: true, in_stock: sell, limit: 60 }),
-    material ? api.grades({ material_id: material.id, has_products: true, in_stock: sell, limit: 60 }) : null,
-    grade ? api.products({ grade_id: grade.id, in_stock: sell, limit: 60 }) : null
+    api.materials({ has_products: true, in_stock: stockOnly(), limit: 60 }),
+    material ? api.grades({ material_id: material.id, has_products: true, in_stock: stockOnly(), limit: 60 }) : null,
+    grade ? api.products({ grade_id: grade.id, in_stock: stockOnly(), limit: 60 }) : null
   ]).catch(() => [{ items: [] }, null, null]);
   if (!state) return;
   state.levels = { materials: m.items, grades: g ? g.items : [], products: p ? p.items : [] };
@@ -123,7 +131,7 @@ const productTyped = debounce(async () => {
   const my = ++seq.product;
   const q = state.productQ.trim();
   if (!q) { state.hits = null; render(); return; }
-  const r = await api.products({ q, in_stock: state.side === 'sell', limit: 12 }).catch(() => null);
+  const r = await api.products({ q, in_stock: stockOnly(), limit: 12 }).catch(() => null);
   if (!state || !r || my !== seq.product) return;
   state.hits = r;
   render();
@@ -159,10 +167,17 @@ async function loadWarehouses(auto = false, append = false) {
   const my = ++seq.wh;
   const sell = state.side === 'sell';
   const offset = append ? state.whs.items.length : 0;
-  const r = await (sell
-    ? api.warehouses({ product_id: state.product.id, in_stock: true, limit: 50 })
+  let r = await (sell
+    ? api.warehouses({ product_id: state.product.id, in_stock: !state.shortOK, limit: 50 })
     : api.warehouses({ q: state.whQ, limit: 12, offset })).catch(() => null);
   if (!state || !r || my !== seq.wh) return;
+  if (sell && !r.items.length && !state.shortOK) {
+    // held nowhere: the only way to sell it is short, from any warehouse
+    state.shortOK = true;
+    r = await api.warehouses({ product_id: state.product.id, limit: 50 }).catch(() => null);
+    if (!state || !r || my !== seq.wh) return;
+    auto = false;
+  }
   state.whs = { items: append ? state.whs.items.concat(r.items) : r.items, total: r.total };
   if (sell && auto && r.items.length === 1) return chooseWarehouse(r.items[0]);
   render();
@@ -177,16 +192,23 @@ async function chooseWarehouse(w) {
     if (!state) return;
     state.lots = r.items;
     resetAlloc();
-    const max = stockG();
-    if (!state.qty_g || state.qty_g > max) state.qty_g = max;
+    if (!state.qty_g) state.qty_g = stockG();
+    if (state.qty_g > stockG()) takeEverything();
   } else {
     rememberWh(w.id);
   }
   render();
 }
 
-// On a sale the most you can sell is what sits in the dispatching warehouse.
+// What sits in the dispatching warehouse. Selling more than this is short.
 const stockG = () => state.lots.reduce((s, l) => s + (l.available_g || 0), 0);
+const shortG = () => (state.side === 'sell' ? Math.max(0, state.qty_g - stockG()) : 0);
+
+// A short sale must take every lot in the warehouse in full - there is no other split.
+function takeEverything() {
+  state.allocText = {};
+  for (const lot of state.lots) state.alloc[lot.id] = lot.available_g;
+}
 
 async function refreshSauda(force) {
   const r = await api.saudaNext(state.date).catch(() => null);
@@ -203,11 +225,13 @@ function flow() {
   });
   const assigned = rows.reduce((s, r) => s + r.take, 0);
   const costTotal = rows.reduce((s, r) => s + r.take * r.lot.rate_paise, 0);
+  const target = Math.min(state.qty_g, stockG());      // what stock can cover; the rest is sold short
   return {
-    rows, assigned,
-    left: state.qty_g - assigned,
-    short: Math.max(0, state.qty_g - assigned),
-    over: Math.max(0, assigned - state.qty_g),
+    rows, assigned, target,
+    left: target - assigned,
+    short: Math.max(0, target - assigned),
+    over: Math.max(0, assigned - target),
+    soldShort: shortG(),
     used: rows.filter(r => r.take > 0),
     margin: rows.reduce((s, r) => s + r.margin, 0),
     avgCost: assigned ? rnd(costTotal / assigned) : 0,
@@ -397,6 +421,8 @@ function blockProduct() {
               () => chooseProduct(p.id), stockTag(p))))) : null),
     h('div', { class: 'block-actions' },
       !sell ? h('button', { class: 'chip ghost', onclick: addProduct }, '+ Add new product') : null,
+      sell && !state.shortOK ? h('button', { class: 'chip ghost', onclick: () => { state.shortOK = true; state.hits = null; productTyped(); loadLevels(); } },
+        'Sell short — show products not in stock') : null,
       h('button', { class: 'setup-link', onclick: () => { ctx.setupTab = 'products'; ctx.go('setup'); } },
         'Manage products')));
 }
@@ -428,9 +454,11 @@ function blockWarehouse() {
     h('div', { class: 'chips' },
       ...items.map(w => h('button', { class: 'chip', onclick: () => chooseWarehouse(w) },
         w.name,
-        sell ? h('small', {}, f.qty(w.product_stock_g, { short: true }))
+        sell ? h('small', {}, w.product_stock_g > 0 ? f.qty(w.product_stock_g, { short: true }) : 'none · short')
              : (w.id === last ? h('small', {}, 'last used') : null))),
-      sell && !items.length ? h('span', { class: 'dim' }, 'No warehouse holds this product.') : null),
+      sell && !items.length ? h('span', { class: 'dim' }, 'No warehouse holds this product.') : null,
+      sell && !state.shortOK ? h('button', { class: 'chip ghost', onclick: () => { state.shortOK = true; loadWarehouses(); } },
+        'Sell short from another warehouse') : null),
     h('div', { class: 'block-actions' },
       !sell && items.length < total ? h('button', { class: 'chip small', onclick: () => loadWarehouses(false, true) },
         `Show more (${total - items.length})`) : null,
@@ -453,7 +481,8 @@ function blockQty() {
     : [['5 MT', 5 * MT], ['10 MT', 10 * MT], ['20 MT', 20 * MT], ['25 MT', 25 * MT]];
 
   return h('div', { class: 'block' + (state.warehouse ? '' : ' pending') },
-    label('Quantity', done, sell && max ? `most you can sell from ${state.warehouse.name} is ${f.qty(max)}` : null),
+    label('Quantity', done, sell && state.warehouse
+      ? `${state.warehouse.name} holds ${f.qty(max)}${max ? '' : ' of it'} · more than that is sold short` : null),
     h('div', { class: 'dial' },
       h('button', { class: 'step', onclick: () => setQty(state.qty_g - MT) }, '−'),
       ui.qtyDial = h('div', { class: 'dial-value num' },
@@ -470,15 +499,23 @@ function blockQty() {
         const el = h('button', { class: 'chip' + (state.qty_g === g ? ' on' : ''), onclick: () => setQty(g) }, text);
         ui.qtyChips.push({ el, g });
         return el;
-      })));
+      })),
+    sell && state.warehouse ? (ui.shortNote = h('div', { class: 'short-note' }, shortText())) : null);
 }
 
-// No short selling: a sale can never exceed what the warehouse holds.
+function shortText() {
+  const s = shortG();
+  return s ? `${f.qty(s)} sold short — ${state.warehouse.name} shows −${f.qty(s)} until the next ` +
+             `${state.product.display} bought or moved into ${state.warehouse.name} covers it, oldest short first.` : '';
+}
+
+// Past what the warehouse holds, a sale goes short: every lot is taken in full.
 function setQty(g) {
-  const max = sellSide() ? stockG() : Infinity;
-  const before = state.qty_g;
-  state.qty_g = Math.max(0, Math.min(max, g || 0));
-  if ((before > 0) !== (state.qty_g > 0)) render(); else sync();
+  const before = state.qty_g, wasShort = shortG() > 0;
+  state.qty_g = Math.max(0, g || 0);
+  if (shortG() > 0) takeEverything();
+  else if (wasShort) resetAlloc();
+  if ((before > 0) !== (state.qty_g > 0) || wasShort !== shortG() > 0) render(); else sync();
 }
 
 function blockRate() {
@@ -553,6 +590,10 @@ function setRate(paise, typing = false) {
 // ---------------------------------------------------------------- the split
 function blockSplit() {
   if (!state.warehouse || !state.qty_g) return h('div', { class: 'block pending' }, label('Which stock goes out', false));
+  if (!state.lots.length) {
+    return h('div', { class: 'block' }, label(`Which stock goes out of ${state.warehouse.name}`, true),
+      h('div', { class: 'dim' }, `${state.warehouse.name} holds none of it — all ${f.qty(state.qty_g)} is sold short.`));
+  }
   const fl = flow();
   const rows = fl.rows.slice().sort((a, b) => a.lot.rate_paise - b.lot.rate_paise);
   return h('div', { class: 'block' },
@@ -589,9 +630,10 @@ function paintAssign(fl) {
   const done = fl.left === 0, over = fl.left < 0;
   r.el.className = 'assign' + (done ? ' done' : over ? ' over' : '');
   r.label.textContent = done ? 'Ready' : over ? 'Too much by' : 'Left to assign';
-  r.num.textContent = done ? f.qty(state.qty_g) : f.qty(Math.abs(fl.left));
-  r.of.textContent = done ? `placed across ${fl.used.length} lot${fl.used.length === 1 ? '' : 's'}` : `of ${f.qty(state.qty_g)}`;
-  r.barI.style.width = (state.qty_g ? Math.min(100, (fl.assigned / state.qty_g) * 100) : 0) + '%';
+  r.num.textContent = done ? f.qty(fl.target) : f.qty(Math.abs(fl.left));
+  r.of.textContent = done ? `placed across ${fl.used.length} lot${fl.used.length === 1 ? '' : 's'}` +
+    (fl.soldShort ? ` · ${f.qty(fl.soldShort)} short` : '') : `of ${f.qty(fl.target)}`;
+  r.barI.style.width = (fl.target ? Math.min(100, (fl.assigned / fl.target) * 100) : 0) + '%';
   r.done.textContent = `${f.qty(fl.assigned)} assigned`;
   r.rate.textContent = state.rate_paise ? f.rate(state.rate_paise) : '—';
   r.cost.textContent = fl.assigned ? f.rate(fl.avgCost) : '—';
@@ -658,6 +700,7 @@ function sync() {
     if (ui.qtyBox.value !== want) ui.qtyBox.value = want;
   }
   if (ui.rateDial) ui.rateDial.textContent = f.rate(state.rate_paise);
+  if (ui.shortNote) ui.shortNote.textContent = shortText();
   if (fl) { for (const row of fl.rows) paintRow(row, fl); paintAssign(fl); }
   paintBar(fl);
 }
@@ -757,6 +800,10 @@ function lineText(fl, value) {
   }
   if (fl && fl.short > 0) return { text: `${f.qty(fl.short)} still to assign`, err: true };
   if (fl && fl.over > 0) return { text: `${f.qty(fl.over)} more than you are selling — lower an amount`, err: true };
+  if (fl && fl.soldShort) {
+    return { text: `${f.qty(state.qty_g)} @ ${f.rate(state.rate_paise)} · ${f.qty(fl.soldShort)} SOLD SHORT from ` +
+                   `${state.warehouse.name} — the next stock into ${state.warehouse.name} covers it`, err: true };
+  }
   const bits = [`${f.qty(state.qty_g)} ${state.product.display} @ ${f.rate(state.rate_paise)}`,
     `${sellSide() ? 'from' : 'into'} ${state.warehouse.name}`, `= ${f.inr(value)}`];
   if (fl) bits.push(`cost ${f.rate(fl.avgCost)} · ${fl.used.length} lot${fl.used.length === 1 ? '' : 's'}`);
@@ -808,6 +855,7 @@ async function confirm() {
       payment_due: state.payment_due || undefined,
       ex_place: (state.ex_place || '').trim() || undefined,
       pins: fl ? fl.rows.map(r => ({ lot_id: r.lot.id, qty_g: r.take })) : undefined,
+      allow_short: !!(fl && fl.soldShort),
       transporter_id: state.transporter ? state.transporter.id : undefined,
       freight_by: state.terms.freight_by || undefined,
       delivery_by: state.terms.delivery_by || undefined,

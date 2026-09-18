@@ -19,6 +19,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m tests.test_api           # every endpoint, every list is a page
 .venv/bin/python -m tests.test_cancel        # cancel/undo puts every figure back exactly
 .venv/bin/python -m tests.test_edit          # an edited deal equals one booked that way from the start
+.venv/bin/python -m tests.test_shorts        # sell short then buy equals buy then sell, every way round
 ```
 
 Every test module also runs against Postgres: `DATABASE_URL=postgres://... python -m tests.<module>`.
@@ -54,16 +55,23 @@ Margins are computed on basic rates throughout, because GST is pass-through.
 Freight, delivery, transport, payment and e-way are **recorded but not
 costed** — they sit on the deal as text.
 
-**5. Short selling is off.** A sale is either fully covered by real lots in its
-warehouse or it does not book. `allow_short_sales` stays `0`.
+**5. Selling short is explicit.** A sale can go past what its warehouse holds
+only once it takes every lot there in full, and only when the trader says so
+(the ticket shows the short part in red; the server wants `allow_short`). The
+uncovered part is owed: that warehouse shows negative stock, and the next stock
+of that product to arrive there - bought, moved in, found, or handed back by a
+cancelled sale - covers the oldest short first, at that stock's cost. Only the
+covered part of a sale counts as realised margin; the short part is valued at
+the mark in open P&L. A warehouse never has free stock and an open short at
+the same time.
 
 **6. Everything is reversible.** Booking, transferring and adjusting each write
 an undoable event; `U` or the toast reverses the last one. Cancelling a sale
 hands the exact grams back to the exact lots they came from. Cancelling a
 *purchase* whose stock is already sold can move those sales onto other stock
 of the same product in the same warehouse (shown before and after, sale by
-sale); if there is not enough, or some of it was moved, it is refused and the
-error names what blocks it.
+sale); what other stock cannot cover goes back to being sold short. If some of
+it was moved, it is refused and the error names what blocks it.
 
 **7. Deals can be edited.** Edit on a booked deal opens its ticket filled in.
 Nothing is saved until the review shows every change and every sale whose
@@ -107,13 +115,14 @@ Every lot starts at **zero**. He types into the ones he wants; `fill rest`
 drops the outstanding balance into a row. **Left to assign** is sticky and has
 exactly one target: zero.
 
-### No short, no over — enforced in three places
+### No accidental short, no over — enforced in three places
 
-* The **quantity** cannot exceed what the dispatching warehouse holds.
-* The **book button stays locked** unless assigned equals the sale exactly.
-* The **server refuses anyway**: a sale that cannot be covered from real lots in
-  its warehouse is rejected with the shortfall and the warehouse's stock named,
-  and a pin on a lot in another warehouse is refused.
+* A **quantity** past what the dispatching warehouse holds turns the ticket into
+  a short sale, in red, with every lot taken in full.
+* The **book button stays locked** unless the lots add up exactly to what the
+  warehouse can cover.
+* The **server refuses anyway**: a short not asked for, a short that leaves stock
+  unused in its warehouse, and a pin on a lot in another warehouse.
 
 ### Screens
 
@@ -183,7 +192,7 @@ writes nothing. The pool is the product's lots **in the sale's warehouse**.
 2. **Then oldest stock first** for anything unspecified — only callers that leave
    lots out (the seed, re-planning) ever reach this; the ticket sends every lot.
 3. **Whatever is left over is a short**, reported rather than rounded away, and
-   refused at booking.
+   refused at booking unless the sale was booked short on purpose.
 
 ---
 
@@ -207,6 +216,7 @@ backend/
     allocation.py     the engine
     deals.py          lifecycle: draft → booked → cancelled
     revise.py         editing a booked deal; moving sales onto other stock
+    shorts.py         selling short: open shorts, and covering them as stock arrives
     inventory.py      positions, lineage graph
     dashboard.py      summary, attention, counterparties
 web/js/

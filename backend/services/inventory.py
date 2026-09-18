@@ -14,7 +14,8 @@ from typing import Any, Dict, List, Optional
 
 from .. import db
 from ..money import value_paise, weighted_rate
-from .stock import AVAILABLE, LOT_SELECT, lots_for
+from . import shorts
+from .stock import _CELLS, AVAILABLE, LOT_SELECT, lots_for
 
 
 def _round_div(gram_paise: int, per: int = 1000) -> int:
@@ -29,7 +30,7 @@ def totals() -> Dict[str, Any]:
     """Book-wide figures, computed in SQL - never a sum over a page."""
     row = db.q1(
         """
-        SELECT COUNT(DISTINCT CASE WHEN st.stock_g > 0 THEN s.id END) AS products,
+        SELECT COUNT(DISTINCT CASE WHEN st.stock_g > 0 OR sh.short_g > 0 THEN s.id END) AS products,
                COALESCE(SUM(st.stock_g), 0) AS stock_g,
                COALESCE(SUM(st.cost_value), 0) AS cost_value,
                COALESCE(SUM(CASE WHEN m.rate_paise IS NOT NULL
@@ -44,17 +45,22 @@ def totals() -> Dict[str, Any]:
                           COUNT(*) AS open_lots
                    FROM lots l WHERE l.status='open' AND {a} > 0
                    GROUP BY l.product_id) st ON st.product_id = s.id
+        LEFT JOIN (SELECT x.product_id, SUM(x.uncovered_g) AS short_g FROM ({o}) x
+                   GROUP BY x.product_id) sh ON sh.product_id = s.id
         LEFT JOIN marks m ON m.product_id = s.id
-        """.format(a=AVAILABLE))
+        """.format(a=AVAILABLE, o=shorts.OPEN))
+    short_g = db.scalar("SELECT COALESCE(SUM(uncovered_g),0) FROM (%s) x" % shorts.OPEN)
     realised = db.scalar(
         """SELECT COALESCE(SUM(a.qty_g * (a.sale_rate_paise - a.cost_paise)), 0)
            FROM allocations a JOIN deals d ON d.id = a.sale_deal_id
            WHERE a.active = 1 AND d.status = 'booked'""")
     return {
         "products": row["products"],
-        "stock_g": row["stock_g"],
+        # stock is free stock less what is sold short; a short is valued at the mark
+        "stock_g": row["stock_g"] - short_g,
+        "short_g": short_g,
         "stock_value_paise": _round_div(row["cost_value"]),
-        "unrealised_paise": _round_div(row["mark_value"] - row["marked_cost_value"]),
+        "unrealised_paise": _round_div(row["mark_value"] - row["marked_cost_value"] + shorts.open_pnl_gp()),
         "realised_paise": _round_div(realised),
         "open_lots": row["open_lots"],
         "warehouses": db.scalar("SELECT COUNT(*) FROM warehouses"),
@@ -78,13 +84,16 @@ _POS_SEARCH = """
 def _stock_join(warehouse_id: Optional[int]) -> str:
     return """LEFT JOIN (SELECT l.product_id, SUM({a}) AS stock_g, COUNT(*) AS open_lots
                          FROM lots l WHERE l.status='open' AND {a} > 0 {w}
-                         GROUP BY l.product_id) st ON st.product_id = s.id""".format(
-        a=AVAILABLE, w="AND l.warehouse_id = ?" if warehouse_id else "")
+                         GROUP BY l.product_id) st ON st.product_id = s.id
+              LEFT JOIN (SELECT x.product_id, SUM(x.uncovered_g) AS short_g FROM ({o}) x {xw}
+                         GROUP BY x.product_id) sh ON sh.product_id = s.id""".format(
+        a=AVAILABLE, o=shorts.OPEN, w="AND l.warehouse_id = ?" if warehouse_id else "",
+        xw="WHERE x.warehouse_id = ?" if warehouse_id else "")
 
 
 def _pos_filters(q=None, include_flat=False, material_id=None, grade_id=None,
                  manufacturer_id=None, supplier_id=None, warehouse_id=None):
-    where = ["1=1"] if include_flat else ["st.stock_g > 0"]
+    where = ["1=1"] if include_flat else ["(st.stock_g > 0 OR sh.short_g > 0)"]
     args: List[Any] = []
     like = db.like(q)
     if like:
@@ -105,16 +114,17 @@ def positions(include_flat: bool = False, q: Optional[str] = None, limit: Option
               offset: int = 0, warehouse_id: Optional[int] = None, **filters) -> Dict[str, Any]:
     limit, offset = db.page_args(limit, offset, default=12)
     where, args = _pos_filters(q, include_flat, warehouse_id=warehouse_id, **filters)
-    join_args = [int(warehouse_id)] if warehouse_id else []
+    join_args = [int(warehouse_id)] * 2 if warehouse_id else []
     base = " FROM v_products s " + _stock_join(warehouse_id) + \
            " LEFT JOIN marks m ON m.product_id = s.id WHERE " + " AND ".join(where)
     total = db.scalar("SELECT COUNT(*)" + base, join_args + args)
     rows = db.q(
         """SELECT s.id AS product_id, s.display AS product, s.material, s.grade, s.manufacturer,
                   s.material_id, s.grade_id, s.manufacturer_id,
-                  COALESCE(st.stock_g, 0) AS stock_g, COALESCE(st.open_lots, 0) AS open_lots,
+                  COALESCE(st.stock_g, 0) - COALESCE(sh.short_g, 0) AS stock_g,
+                  COALESCE(sh.short_g, 0) AS short_g, COALESCE(st.open_lots, 0) AS open_lots,
                   m.rate_paise AS mark_paise, m.source AS mark_source""" + base +
-        " ORDER BY COALESCE(st.stock_g, 0) DESC, s.display LIMIT ? OFFSET ?",
+        " ORDER BY COALESCE(st.stock_g, 0) - COALESCE(sh.short_g, 0) DESC, s.display LIMIT ? OFFSET ?",
         join_args + args + [limit, offset])
 
     out = []
@@ -122,10 +132,12 @@ def positions(include_flat: bool = False, q: Optional[str] = None, limit: Option
         pos = dict(r)
         lots = open_lots(pos["product_id"], warehouse_id)
         pos["lots"] = lots
+        free = sum(l["available_g"] for l in lots)
         pos["cost_paise"] = weighted_rate([(l["available_g"], l["rate_paise"]) for l in lots])
-        pos["stock_value_paise"] = value_paise(pos["stock_g"], pos["cost_paise"])
+        pos["stock_value_paise"] = value_paise(free, pos["cost_paise"])
         mark = pos["mark_paise"]
-        pos["unrealised_paise"] = value_paise(pos["stock_g"], mark - pos["cost_paise"]) if mark else 0
+        pos["unrealised_paise"] = (value_paise(free, mark - pos["cost_paise"]) if mark else 0) + \
+            _round_div(shorts.open_pnl_gp(pos["product_id"], warehouse_id))
         pos["realised_paise"] = realised_for_product(pos["product_id"])
         pos["cost_low_paise"] = min([l["rate_paise"] for l in lots], default=0)
         pos["cost_high_paise"] = max([l["rate_paise"] for l in lots], default=0)
@@ -145,11 +157,13 @@ def open_lots(product_id: int, warehouse_id: Optional[int] = None) -> List[Dict[
 
 
 def by_warehouse(product_id: int) -> List[Dict[str, Any]]:
+    """Where a product sits; a warehouse it is sold short in shows negative stock."""
     return db.dicts(db.q(
-        """SELECT w.id, w.name, SUM({a}) AS stock_g, COUNT(*) AS lots
-           FROM lots l JOIN warehouses w ON w.id = l.warehouse_id
-           WHERE l.product_id = ? AND l.status = 'open' AND {a} > 0
-           GROUP BY w.id, w.name ORDER BY SUM({a}) DESC, w.name""".format(a=AVAILABLE),
+        """SELECT w.id, w.name, SUM(c.free_g) - SUM(c.short_g) AS stock_g, SUM(c.short_g) AS short_g,
+                  SUM(c.lots) AS lots
+           FROM ({c}) c JOIN warehouses w ON w.id = c.warehouse_id
+           WHERE c.product_id = ?
+           GROUP BY w.id, w.name ORDER BY SUM(c.free_g) - SUM(c.short_g) DESC, w.name""".format(c=_CELLS),
         (int(product_id),)))
 
 
@@ -177,18 +191,28 @@ def position_detail(product_id: int) -> Optional[Dict[str, Any]]:
         lot["margin_paise"] = sum(o["margin_paise"] for o in lot["outflows"])
         lots.append(lot)
 
-    stock_g = sum(l["available_g"] for l in lots)
+    free = sum(l["available_g"] for l in lots)
     cost = weighted_rate([(l["available_g"], l["rate_paise"]) for l in lots if l["available_g"] > 0])
     mark = db.q1("SELECT * FROM marks WHERE product_id=?", (product_id,))
+    open_shorts = db.dicts(db.q(
+        """SELECT d.id, d.ref, d.deal_date, d.qty_g, d.uncovered_g, d.rate_paise, p.name AS party_name,
+                  w.name AS warehouse
+           FROM deals d JOIN parties p ON p.id = d.party_id JOIN warehouses w ON w.id = d.warehouse_id
+           WHERE d.product_id = ? AND d.side = 'sell' AND d.status = 'booked' AND d.uncovered_g > 0
+           ORDER BY d.deal_date, d.id""", (product_id,)))
+    short_g = sum(s["uncovered_g"] for s in open_shorts)
     return {
         "product": dict(product),
         "lots": lots,
-        "stock_g": stock_g,
+        "stock_g": free - short_g,
+        "short_g": short_g,
+        "shorts": open_shorts,
         "cost_paise": cost,
-        "stock_value_paise": value_paise(stock_g, cost),
+        "stock_value_paise": value_paise(free, cost),
         "mark_paise": mark["rate_paise"] if mark else None,
         "mark_source": mark["source"] if mark else None,
-        "unrealised_paise": value_paise(stock_g, mark["rate_paise"] - cost) if mark else 0,
+        "unrealised_paise": (value_paise(free, mark["rate_paise"] - cost) if mark else 0)
+                            + _round_div(shorts.open_pnl_gp(product_id)),
         "realised_paise": realised_for_product(product_id),
         "by_supplier": by_supplier(product_id),
         "warehouses": by_warehouse(product_id),

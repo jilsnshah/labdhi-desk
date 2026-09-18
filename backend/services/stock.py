@@ -82,44 +82,61 @@ _STOCK_SEARCH = ("(LOWER(s.display) LIKE ? OR LOWER(s.material) LIKE ? OR LOWER(
                  "OR LOWER(s.manufacturer) LIKE ? OR LOWER(w.name) LIKE ?)")
 
 
+# One row per lot with stock, one per open short (a sale's uncovered grams).
+# A cell - a product in a warehouse - is the sum of both: free stock, or what
+# is sold short there shown as negative stock. Never both (see shorts.py).
+_CELLS = """
+    SELECT l.product_id, l.warehouse_id, {a} AS free_g, 0 AS short_g, 1 AS lots,
+           {a} * l.rate_paise AS cost_gp, l.rate_paise AS lo, l.rate_paise AS hi
+    FROM lots l WHERE l.status = 'open' AND {a} > 0
+    UNION ALL
+    SELECT d.product_id, d.warehouse_id, 0, d.uncovered_g, 0, 0, CAST(NULL AS BIGINT), CAST(NULL AS BIGINT)
+    FROM deals d WHERE d.side = 'sell' AND d.status = 'booked' AND d.uncovered_g > 0
+""".format(a=AVAILABLE)
+
+
 def stock_rows(q: str = "", product_id: Optional[int] = None, warehouse_id: Optional[int] = None,
                material_id: Optional[int] = None, grade_id: Optional[int] = None,
                manufacturer_id: Optional[int] = None, limit: Optional[int] = None,
                offset: int = 0) -> Dict[str, Any]:
-    """One row per product per warehouse that holds any of it."""
+    """One row per product per warehouse that holds any of it, or is sold short there."""
     limit, offset = db.page_args(limit, offset)
-    where, args = ["l.status = 'open'", AVAILABLE + " > 0"], []
+    where, args = [], []
     like = db.like(q)
     if like:
         where.append(_STOCK_SEARCH); args += [like] * 5
-    for col, val in (("l.product_id", product_id), ("l.warehouse_id", warehouse_id),
+    for col, val in (("c.product_id", product_id), ("c.warehouse_id", warehouse_id),
                      ("s.material_id", material_id), ("s.grade_id", grade_id),
                      ("s.manufacturer_id", manufacturer_id)):
         if val:
             where.append("%s = ?" % col); args.append(int(val))
-    base = """FROM lots l JOIN v_products s ON s.id = l.product_id
-              JOIN warehouses w ON w.id = l.warehouse_id
-              WHERE """ + " AND ".join(where)
-    total = db.scalar("SELECT COUNT(*) FROM (SELECT l.product_id, l.warehouse_id %s "
-                      "GROUP BY l.product_id, l.warehouse_id) x" % base, args)
+    base = """FROM (%s) c JOIN v_products s ON s.id = c.product_id
+              JOIN warehouses w ON w.id = c.warehouse_id
+              %s""" % (_CELLS, ("WHERE " + " AND ".join(where)) if where else "")
+    total = db.scalar("SELECT COUNT(*) FROM (SELECT c.product_id, c.warehouse_id %s "
+                      "GROUP BY c.product_id, c.warehouse_id) x" % base, args)
     rows = db.q(
         """SELECT * FROM (
-             SELECT l.product_id, l.warehouse_id, s.display AS product, s.material, s.grade,
+             SELECT c.product_id, c.warehouse_id, s.display AS product, s.material, s.grade,
                     s.manufacturer, w.name AS warehouse,
-                    SUM({a}) AS stock_g, COUNT(*) AS lots, SUM({a} * l.rate_paise) AS cost_gp,
-                    MIN(l.rate_paise) AS cost_low_paise, MAX(l.rate_paise) AS cost_high_paise
+                    SUM(c.free_g) - SUM(c.short_g) AS stock_g, SUM(c.short_g) AS short_g,
+                    SUM(c.lots) AS lots, SUM(c.cost_gp) AS cost_gp,
+                    MIN(c.lo) AS cost_low_paise, MAX(c.hi) AS cost_high_paise
              {base}
-             GROUP BY l.product_id, l.warehouse_id, s.display, s.material, s.grade,
+             GROUP BY c.product_id, c.warehouse_id, s.display, s.material, s.grade,
                       s.manufacturer, w.name
-           ) x ORDER BY stock_g DESC, product, warehouse LIMIT ? OFFSET ?""".format(a=AVAILABLE, base=base),
+           ) x ORDER BY stock_g DESC, product, warehouse LIMIT ? OFFSET ?""".format(base=base),
         args + [limit, offset])
     marks = {}
     items = []
     for r in rows:
         row = dict(r)
         gp = row.pop("cost_gp")
-        row["cost_paise"] = round(gp / row["stock_g"]) if row["stock_g"] else 0
+        free = row["stock_g"] + row["short_g"]
+        row["cost_paise"] = round(gp / free) if free else 0
         row["stock_value_paise"] = _paise(gp)
+        row["cost_low_paise"] = row["cost_low_paise"] or 0
+        row["cost_high_paise"] = row["cost_high_paise"] or 0
         if row["product_id"] not in marks:
             m = db.q1("SELECT rate_paise FROM marks WHERE product_id=?", (row["product_id"],))
             marks[row["product_id"]] = m["rate_paise"] if m else None
@@ -217,6 +234,12 @@ def movements(product_id: Optional[int] = None, warehouse_id: Optional[int] = No
 
 
 # ------------------------------------------------------------------ transfers & adjustments
+def _cover(conn) -> None:
+    """Stock arriving in a warehouse covers what was sold short there first (see shorts.py)."""
+    from . import shorts
+    shorts.cover(conn)
+
+
 def _open_lot(lot_id) -> Dict[str, Any]:
     lot = get_lot(int(lot_id or 0))
     if lot is None:
@@ -257,6 +280,7 @@ def transfer(lot_id: int, to_warehouse_id: int, qty_g: int, move_date: Optional[
         child = _child(conn, lot, dest["id"], qty_g)
         conn.execute("UPDATE lots SET qty_out_g = qty_out_g + ? WHERE id=?", (qty_g, lot["id"]))
         refresh_lot_status(conn)
+        _cover(conn)
         move_id = conn.insert(
             "INSERT INTO stock_moves(kind,lot_id,to_lot_id,qty_g,reason,move_date,status,created_at) "
             "VALUES ('transfer',?,?,?,?,?,'done',?)",
@@ -286,6 +310,7 @@ def adjust(lot_id: int, qty_g: int, move_date: Optional[str] = None,
         else:
             to_lot = _child(conn, lot, lot["warehouse_id"], qty_g)
         refresh_lot_status(conn)
+        _cover(conn)
         move_id = conn.insert(
             "INSERT INTO stock_moves(kind,lot_id,to_lot_id,qty_g,reason,move_date,status,created_at) "
             "VALUES ('adjust',?,?,?,?,?,'done',?)",
@@ -326,6 +351,7 @@ def cancel_move(move_id: int) -> Dict[str, Any]:
             conn.execute("UPDATE lots SET qty_out_g = qty_out_g - ? WHERE id=?",
                          (abs(m["qty_g"]), m["lot_id"]))
         refresh_lot_status(conn)
+        _cover(conn)
         conn.execute("UPDATE stock_moves SET status='cancelled', cancelled_at=? WHERE id=?",
                      (db.now(), m["id"]))
         db.log(conn, "move", m["id"], "cancel", "Undid movement %d" % m["id"], {})

@@ -77,14 +77,18 @@ stock(product, warehouse) = Σ (qty_g − qty_allocated_g − qty_out_g)
 | Movement | What happens |
 |---|---|
 | Purchase | A booked BUY creates a lot in its receiving warehouse. |
-| Sale | Allocations take grams from lots, **only lots in the sale's warehouse**. The ticket shows only those lots and caps the quantity at what sits there. The server refuses a pin on a lot elsewhere and refuses any short. |
+| Sale | Allocations take grams from lots, **only lots in the sale's warehouse**. The ticket shows only those lots. Past what sits there the sale is short: it takes every lot in full and the rest is owed (`deals.uncovered_g`) until stock arrives there. The server refuses a pin on a lot elsewhere, a short not asked for, and a short that leaves stock unused. |
 | Transfer | Grams leave a lot (`qty_out_g`) and arrive as a new lot in the other warehouse. The new lot keeps the parent, supplier, cost and purchase, so a sale from it still traces to the original buy. |
 | Write-off | Grams leave a lot (`qty_out_g`). |
 | Found stock | A new lot at the same cost, recorded against the lot it was found with. |
 
 Invariants, enforced by tests on SQLite and Postgres:
 
-- Bought + found − written off = in stock + sold.
+- Bought + found − written off = in stock + sold (sold = the covered part of every sale).
+- In any warehouse, a product never has free stock and an open short at once: `shorts.cover()` runs at
+  the end of every change and covers the oldest short from the oldest stock. Stock shown is free
+  stock less open shorts, so it can be negative.
+- Selling short then buying leaves the book exactly as buying then selling would (`tests/test_shorts`).
 - The movement ledger walks back from today's balance to zero.
 - Stock by warehouse, stock by product, and warehouse totals are sums over the same lots, so they
   cannot disagree.
@@ -93,13 +97,14 @@ Every booking, transfer and adjustment can be undone while nothing depends on it
 
 - A purchase that was moved can't be cancelled. One that was sold can be cancelled only by moving
   those sales onto other stock of the same product in the same warehouse (they keep their Sauda
-  No., buyer and rate; only their cost and margin change), and only if that stock exists.
+  No., buyer and rate; only their cost and margin change); what other stock cannot cover is short
+  again. Undoing a purchase reopens exactly the shorts it covered.
 - A transfer whose stock was sold can't be undone.
 
 A booked sauda can be edited (`services/revise.py`). Paperwork changes in place. A sale's rate
 re-prices its allocations; its quantity, warehouse, product or lots re-allocate it in one
 transaction, keeping its Sauda No. A purchase's rate re-prices every sale drawn on it; its
-quantity may drop to what is sold (lower moves sales onto other stock); its product or warehouse
+quantity may drop to what is sold (lower moves sales onto other stock, the rest going short); its product or warehouse
 change only if none of it was transferred. Every edit ends where booking it that way from the
 start would have: `tests/test_edit` builds both books and compares every figure. The screen
 previews an edit by running it and rolling it back, so the preview is what Save does.

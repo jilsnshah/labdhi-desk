@@ -69,9 +69,8 @@ def attention() -> List[Dict[str, Any]]:
         out.append({
             "level": "danger", "kind": "short", "deal_id": short["first_id"] if short["n"] == 1 else None,
             "route": "tape",
-            "title": "%d sale%s not covered by stock (%s short)" % (short["n"], "" if short["n"] == 1 else "s",
-                                                                  fmt_qty(short["g"])),
-            "detail": "Buy to cover, or cancel the sale.",
+            "title": "%s sold short on %d sale%s" % (fmt_qty(short["g"]), short["n"], "" if short["n"] == 1 else "s"),
+            "detail": "The next stock bought into that warehouse covers it, oldest sale first.",
         })
 
     drafts = db.q1("SELECT COUNT(*) AS n, MIN(id) AS first_id FROM deals WHERE status='draft'")

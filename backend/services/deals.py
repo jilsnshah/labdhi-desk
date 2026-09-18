@@ -16,11 +16,19 @@ from typing import Any, Dict, List, Optional
 
 from .. import db
 from ..money import fmt_money, fmt_qty, value_paise, weighted_rate
-from . import allocation, parties, products, stock, warehouses
+from . import allocation, parties, products, shorts, stock, warehouses
 
 
 class DealError(Exception):
     """User-facing, expected failure. The API turns this into a 400."""
+
+
+class ShortNeeded(DealError):
+    """The change leaves a sale short - allowed, but only when asked for."""
+
+    def __init__(self, message: str, grams: int):
+        super().__init__(message)
+        self.grams = grams
 
 
 class RehomeNeeded(DealError):
@@ -149,6 +157,7 @@ def _book(conn, deal_id: int, pins=None, policy=None, allow_short: bool = False)
 
     conn.execute("UPDATE deals SET status='booked', booked_at=? WHERE id=?", (db.now(), deal_id))
     _remark_mark(conn, deal)
+    shorts.cover(conn)                  # a purchase covers whatever was sold short where it lands
 
 
 def _names(deal) -> Dict[str, str]:
@@ -188,10 +197,16 @@ def _book_sell(conn, deal, pins=None, policy=None, allow_short: bool = False) ->
                         % (fmt_qty(plan["uncovered_g"]), n["warehouse"], fmt_qty(held), n["product"]))
 
     _write_allocations(conn, deal, plan, policy)
+    left = stock.available_in(deal["product_id"], deal["warehouse_id"])
+    if plan["uncovered_g"] > 0 and left > 0:
+        # a sale goes short only once it has taken everything the warehouse holds
+        raise DealError("%s still holds %s of %s - take all of it before selling short"
+                        % (n["warehouse"], fmt_qty(left), n["product"]))
     db.log(conn, "deal", deal["id"], "book",
-           "Sold %s %s @ %s from %s  (margin %s)"
+           "Sold %s %s @ %s from %s  (margin %s%s)"
            % (fmt_qty(deal["qty_g"]), n["product"], fmt_money(deal["rate_paise"]),
-              n["warehouse"], fmt_money(_margin_of(deal["id"]))),
+              n["warehouse"], fmt_money(_margin_of(deal["id"])),
+              ", %s short" % fmt_qty(plan["uncovered_g"]) if plan["uncovered_g"] else ""),
            {"ref": deal["ref"], "picks": plan["picks"], "uncovered_g": plan["uncovered_g"]},
            undoable=True)
 
@@ -238,6 +253,9 @@ def reallocate(sale_deal_id: int, pins=None, policy=None) -> Dict[str, Any]:
         if plan["rejected"]:
             raise DealError("Some of the chosen stock is not in this sale's warehouse")
         _write_allocations(conn, deal, plan, policy)
+        if plan["uncovered_g"] > deal["uncovered_g"]:
+            raise DealError("Those lots do not cover %s - pick again" % deal["ref"])
+        shorts.cover(conn)
         db.log(conn, "deal", sale_deal_id, "reallocate",
                "Re-allocated %s" % deal["ref"], {"picks": plan["picks"]}, undoable=False)
     return get_deal(sale_deal_id)
@@ -286,6 +304,7 @@ def cancel_deal(deal_id: int, reason: str = "", rehome: bool = False) -> Dict[st
 
         conn.execute("UPDATE deals SET status='cancelled', cancelled_at=? WHERE id=?",
                      (db.now(), deal_id))
+        shorts.cover(conn)              # stock a cancelled sale hands back covers open shorts first
         # The booking is reversed now, so it is no longer something Undo can
         # reverse; Undo moves on to whatever was done before it.
         conn.execute("UPDATE events SET undone=1 WHERE entity='deal' AND entity_id=? "
@@ -293,6 +312,12 @@ def cancel_deal(deal_id: int, reason: str = "", rehome: bool = False) -> Dict[st
         db.log(conn, "deal", deal_id, "cancel", "Cancelled %s" % deal["ref"],
                {"reason": reason, "ref": deal["ref"]})
     return get_deal(deal_id)
+
+
+def only_covers_shorts(buy_id: int) -> bool:
+    """Every gram sold from this purchase went to cover a short, nothing else."""
+    return not db.scalar("SELECT COUNT(*) FROM allocations a JOIN lots l ON l.id = a.lot_id "
+                         "WHERE l.deal_id=? AND a.active=1 AND a.method != 'covered'", (buy_id,))
 
 
 # ------------------------------------------------------------------ marks
@@ -386,6 +411,11 @@ def get_deal(deal_id: int) -> Optional[Dict[str, Any]]:
         deal["margin_paise"] = sum(a["margin_paise"] for a in deal["allocations"])
         deal["cost_paise"] = weighted_rate([(a["qty_g"], a["cost_paise"]) for a in deal["allocations"]])
         deal["margin_rate_paise"] = (deal["rate_paise"] - deal["cost_paise"]) if deal["cost_paise"] else 0
+        # sold short: its cost is not known until stock covers it; until then it is valued at the mark
+        deal["short_g"] = deal["uncovered_g"] if deal["status"] == "booked" else 0
+        mark = db.q1("SELECT rate_paise FROM marks WHERE product_id=?", (deal["product_id"],))
+        deal["short_est_paise"] = (value_paise(deal["short_g"], deal["rate_paise"] - mark["rate_paise"])
+                                   if deal["short_g"] and mark else None)
     else:
         lots = db.dicts(db.q(stock.LOT_SELECT + " WHERE l.deal_id=? ORDER BY l.id", (deal_id,)))
         deal["lot"] = next((l for l in lots if not l["parent_lot_id"]), None)
@@ -497,7 +527,9 @@ def undo_event(event_id: int) -> Dict[str, Any]:
         raise DealError("That action cannot be undone")
 
     if ev["entity"] == "deal" and ev["action"] == "book":
-        result = {"deal": cancel_deal(int(ev["entity_id"]), reason="undo")}
+        # undoing a purchase that covered shorts reopens exactly those shorts
+        did = int(ev["entity_id"])
+        result = {"deal": cancel_deal(did, reason="undo", rehome=only_covers_shorts(did))}
     elif ev["entity"] == "move":
         try:
             result = {"move": stock.cancel_move(int(ev["entity_id"]))}

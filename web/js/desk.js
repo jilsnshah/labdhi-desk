@@ -110,7 +110,7 @@ export function ladder(pos, { height = 34, labels = true } = {}) {
 
 export function whTags(list, max = 4) {
   return h('div', { class: 'wh-tags' },
-    ...list.slice(0, max).map(w => h('span', { class: 'wh-tag' }, w.name, h('b', {}, f.qty(w.stock_g, { short: true })))),
+    ...list.slice(0, max).map(w => h('span', { class: 'wh-tag' }, w.name, h('b', { class: f.neg(w.stock_g) }, f.qty(w.stock_g, { short: true })))),
     list.length > max ? h('span', { class: 'dim' }, `+${list.length - max}`) : null);
 }
 
@@ -123,8 +123,9 @@ function positionCard(p, ctx) {
         h('div', { class: 'pos-meta' },
           p.suppliers.slice(0, 3).join(' · ') + (p.suppliers.length > 3 ? ` +${p.suppliers.length - 3}` : ''))),
       h('div', { class: 'pos-qty' },
-        h('b', { class: 'num' }, f.qty(p.stock_g)),
-        h('span', {}, `${p.open_lots} lot${p.open_lots === 1 ? '' : 's'}`))),
+        h('b', { class: 'num' + f.neg(p.stock_g) }, f.qty(p.stock_g)),
+        h('span', {}, `${p.open_lots} lot${p.open_lots === 1 ? '' : 's'}` +
+          (p.short_g ? ` · ${f.qty(p.short_g)} sold short` : '')))),
     whTags(p.warehouses),
     ladder(p),
     h('div', { class: 'ladder-legend' },

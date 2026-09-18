@@ -45,8 +45,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from .. import db
 from ..money import fmt_qty
 from . import allocation, parties, products, stock, warehouses
-from .deals import (DealError, RehomeNeeded, _release_allocations, _require, _write_allocations,
-                    get_deal)
+from . import shorts
+from .deals import (DealError, RehomeNeeded, ShortNeeded, _release_allocations, _require,
+                    _write_allocations, get_deal)
 
 
 PAPER = ("plus_gst", "deal_date", "payment_due", "ex_place", "transporter_id",
@@ -75,18 +76,25 @@ def dry_run(fn):
 # ------------------------------------------------------------------ what moved
 def _book_state() -> Dict[str, Any]:
     sales = {r["id"]: dict(r) for r in db.q(
-        """SELECT d.id, d.ref, p.name AS party, d.qty_g,
+        """SELECT d.id, d.ref, p.name AS party, d.qty_g, d.uncovered_g,
                   COALESCE(SUM(a.qty_g * (a.sale_rate_paise - a.cost_paise)), 0) AS margin_gp,
                   COALESCE(SUM(a.qty_g * a.cost_paise), 0) AS cost_gp,
                   COALESCE(SUM(a.qty_g), 0) AS alloc_g
            FROM deals d JOIN parties p ON p.id = d.party_id
            LEFT JOIN allocations a ON a.sale_deal_id = d.id AND a.active = 1
            WHERE d.side = 'sell' AND d.status = 'booked'
-           GROUP BY d.id, d.ref, p.name, d.qty_g""")}
-    cells = {(r["product"], r["warehouse"]): r["g"] for r in db.q(
-        """SELECT s.display AS product, w.name AS warehouse, SUM(%s) AS g
-           FROM lots l JOIN v_products s ON s.id = l.product_id JOIN warehouses w ON w.id = l.warehouse_id
-           WHERE l.status = 'open' GROUP BY s.display, w.name""" % stock.AVAILABLE)}
+           GROUP BY d.id, d.ref, p.name, d.qty_g, d.uncovered_g""")}
+    # stock as the screens show it: free stock less what is sold short there
+    cells: Dict[Any, int] = {}
+    for r in db.q("""SELECT s.display AS product, w.name AS warehouse, SUM(%s) AS g
+                     FROM lots l JOIN v_products s ON s.id = l.product_id JOIN warehouses w ON w.id = l.warehouse_id
+                     WHERE l.status = 'open' GROUP BY s.display, w.name""" % stock.AVAILABLE):
+        cells[(r["product"], r["warehouse"])] = int(r["g"])
+    for r in db.q("""SELECT s.display AS product, w.name AS warehouse, SUM(x.uncovered_g) AS g
+                     FROM (%s) x JOIN v_products s ON s.id = x.product_id JOIN warehouses w ON w.id = x.warehouse_id
+                     GROUP BY s.display, w.name""" % shorts.OPEN):
+        key = (r["product"], r["warehouse"])
+        cells[key] = cells.get(key, 0) - int(r["g"])
     realised = db.scalar("""SELECT COALESCE(SUM(a.qty_g * (a.sale_rate_paise - a.cost_paise)), 0)
                             FROM allocations a JOIN deals d ON d.id = a.sale_deal_id
                             WHERE a.active = 1 AND d.status = 'booked'""")
@@ -111,13 +119,16 @@ def _effects(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
         b, a = before["sales"].get(sid), after["sales"].get(sid)
         bm = _gp(b["margin_gp"]) if b else None
         am = _gp(a["margin_gp"]) if a else None
-        if bm != am:
+        bs = b["uncovered_g"] if b else 0
+        as_ = a["uncovered_g"] if a else 0
+        if bm != am or bs != as_:
             ref = (a or b)["ref"]
             party = (a or b)["party"]
             qty = (a or b)["qty_g"]
             sales.append({"id": sid, "ref": ref, "party": party, "qty_g": qty,
                           "margin_before_paise": bm, "margin_after_paise": am,
-                          "cost_before_paise": _avg(b), "cost_after_paise": _avg(a)})
+                          "cost_before_paise": _avg(b), "cost_after_paise": _avg(a),
+                          "short_before_g": bs, "short_after_g": as_})
     cells = []
     for key in sorted(set(before["cells"]) | set(after["cells"])):
         b, a = before["cells"].get(key, 0), after["cells"].get(key, 0)
@@ -161,22 +172,11 @@ def recompute_mark(conn, product_id: int, ref: str) -> None:
 
 
 # ------------------------------------------------------------------ rehoming
-def _add_allocation(conn, sale_id: int, sale_rate: int, lot: Dict[str, Any], qty_g: int, method: str) -> None:
-    same = db.q1("SELECT id FROM allocations WHERE sale_deal_id=? AND lot_id=? AND active=1 "
-                 "AND cost_paise=? AND sale_rate_paise=?", (sale_id, lot["id"], lot["rate_paise"], sale_rate))
-    if same:
-        conn.execute("UPDATE allocations SET qty_g = qty_g + ? WHERE id=?", (qty_g, same["id"]))
-    else:
-        conn.execute("""INSERT INTO allocations(sale_deal_id,lot_id,qty_g,cost_paise,sale_rate_paise,
-                                                method,created_at,active) VALUES (?,?,?,?,?,?,?,1)""",
-                     (sale_id, lot["id"], qty_g, lot["rate_paise"], sale_rate, method, db.now()))
-    conn.execute("UPDATE lots SET qty_allocated_g = qty_allocated_g + ? WHERE id=?", (qty_g, lot["id"]))
-
-
 def move_allocations(conn, pieces: List[Tuple[Dict[str, Any], int]], exclude_lot_ids: List[int]) -> None:
     """Move `qty` of each allocation off its lot onto other lots of the same
-    product in the same warehouse, oldest first. Raises, changing nothing that
-    survives the transaction, if other stock cannot cover it."""
+    product in the same warehouse, oldest first. What other stock cannot
+    cover, the sale is short of again - to be covered by the next stock that
+    arrives there, like any short."""
     excluded = set(exclude_lot_ids)
     for alloc, qty in pieces:
         if qty <= 0:
@@ -196,15 +196,10 @@ def move_allocations(conn, pieces: List[Tuple[Dict[str, Any], int]], exclude_lot
             if lot["id"] in excluded or lot["available_g"] <= 0:
                 continue
             take = min(lot["available_g"], need)
-            _add_allocation(conn, alloc["sale_deal_id"], alloc["sale_rate_paise"], lot, take, "rehomed")
+            shorts.add_allocation(conn, alloc["sale_deal_id"], alloc["sale_rate_paise"], lot, take, "rehomed")
             need -= take
         if need > 0:
-            sale = db.q1("SELECT ref FROM deals WHERE id=?", (alloc["sale_deal_id"],))
-            names = db.q1("""SELECT s.display AS product, w.name AS warehouse FROM lots l
-                             JOIN v_products s ON s.id = l.product_id JOIN warehouses w ON w.id = l.warehouse_id
-                             WHERE l.id = ?""", (alloc["lot_id"],))
-            raise DealError("Not enough other %s in %s to move %s onto - %s more is needed. Nothing was changed."
-                            % (names["product"], names["warehouse"], sale["ref"], fmt_qty(need)))
+            conn.execute("UPDATE deals SET uncovered_g = uncovered_g + ? WHERE id=?", (need, alloc["sale_deal_id"]))
     stock.refresh_lot_status(conn)
 
 
@@ -322,7 +317,7 @@ def _one_row_per_lot(conn, sale_id: int) -> None:
                       first["method"], db.now()))
 
 
-def _edit_sale(conn, old, new, changed, pins) -> None:
+def _edit_sale(conn, old, new, changed, pins, allow_short: bool) -> None:
     _write_fields(conn, old["id"], new, changed)
     policy = old["alloc_policy"] or allocation.DEFAULT_POLICY
     held = db.scalar("SELECT COALESCE(SUM(qty_g),0) FROM allocations WHERE sale_deal_id=? AND active=1",
@@ -354,10 +349,16 @@ def _edit_sale(conn, old, new, changed, pins) -> None:
     covered = db.scalar("SELECT COALESCE(SUM(qty_g),0) FROM allocations WHERE sale_deal_id=? AND active=1",
                         (old["id"],))
     short = max(0, new["qty_g"] - covered)
-    if short > 0 and short > old["uncovered_g"] and db.settings().get("allow_short_sales") != "1":
-        free = stock.available_in(new["product_id"], new["warehouse_id"])
-        raise DealError("Short by %s - %s has only %s more of %s free for this sale. Nothing was changed."
-                        % (fmt_qty(short), names["warehouse"], fmt_qty(free), names["product"]))
+    free = stock.available_in(new["product_id"], new["warehouse_id"])
+    if short > 0 and free > 0:
+        # a sale goes short only once it has taken everything the warehouse holds
+        raise DealError("%s still holds %s of %s - take all of it before selling short"
+                        % (names["warehouse"], fmt_qty(free), names["product"]))
+    if short > old["uncovered_g"] and not (allow_short or db.settings().get("allow_short_sales") == "1"):
+        raise ShortNeeded("%s holds only %s of %s for this sale - %s would be sold short, and covered by "
+                          "the next %s that arrives in %s"
+                          % (names["warehouse"], fmt_qty(covered), names["product"], fmt_qty(short),
+                             names["product"], names["warehouse"]), short)
     conn.execute("UPDATE deals SET uncovered_g=? WHERE id=?", (short, old["id"]))
     _one_row_per_lot(conn, old["id"])
     recompute_mark(conn, old["product_id"], old["ref"])
@@ -420,7 +421,8 @@ def _edit_purchase(conn, old, new, changed, rehome: bool) -> None:
     stock.refresh_lot_status(conn)
 
 
-def edit_deal(deal_id: int, changes: Dict[str, Any], rehome: bool = False) -> Dict[str, Any]:
+def edit_deal(deal_id: int, changes: Dict[str, Any], rehome: bool = False,
+              allow_short: bool = False) -> Dict[str, Any]:
     with db.tx() as conn:
         row = db.q1("SELECT * FROM deals WHERE id=?", (deal_id,))
         if row is None:
@@ -436,12 +438,13 @@ def edit_deal(deal_id: int, changes: Dict[str, Any], rehome: bool = False) -> Di
         if not changed and pins is None:
             return get_deal(deal_id)
         if old["side"] == "sell":
-            _edit_sale(conn, old, new, changed, pins)
+            _edit_sale(conn, old, new, changed, pins, allow_short)
         else:
             _edit_purchase(conn, old, new, changed, rehome)
+        shorts.cover(conn)          # stock the edit freed, or brought, covers open shorts first
         db.log(conn, "deal", deal_id, "edit", "Edited %s: %s" % (old["ref"], ", ".join(changed) or "lots"),
                {"ref": old["ref"], "changes": {k: [old[k], new[k]] for k in changed},
-                "pins": pins, "rehome": rehome})
+                "pins": pins, "rehome": rehome, "allow_short": allow_short})
     return get_deal(deal_id)
 
 
@@ -471,29 +474,45 @@ def _labels(old: Dict[str, Any], new: Dict[str, Any], changed: List[str]) -> Lis
     return [{"field": k, "label": names[k], "before": show(k, old[k]), "after": show(k, new[k])} for k in changed]
 
 
-def preview_edit(deal_id: int, changes: Dict[str, Any], rehome: bool = False) -> Dict[str, Any]:
+def _consenting(run, out: Dict[str, Any], rehome: bool = False, allow_short: bool = False) -> None:
+    """Run a preview; where it stops for consent - moving sales, or selling
+    short - say so and run it again with that consent, so the trader sees
+    what saying yes would do."""
+    for _ in range(3):
+        try:
+            out.update(dry_run(lambda: run(rehome, allow_short)))
+            out["error"] = None
+            return
+        except RehomeNeeded as need:
+            if rehome:
+                out["error"] = str(need); return
+            rehome = True
+            out.update({"needs_rehome": True, "rehome_grams": need.grams, "reason": str(need)})
+        except ShortNeeded as need:
+            if allow_short:
+                out["error"] = str(need); return
+            allow_short = True
+            out.update({"needs_short": True, "short_grams": need.grams, "short_reason": str(need)})
+        except DealError as exc:
+            out["error"] = str(exc)
+            return
+
+
+def preview_edit(deal_id: int, changes: Dict[str, Any], rehome: bool = False,
+                 allow_short: bool = False) -> Dict[str, Any]:
     """What saving would do, computed by saving and rolling back."""
     row = db.q1("SELECT * FROM deals WHERE id=?", (deal_id,))
     if row is None:
         raise DealError("Deal not found")
     old = dict(row)
 
-    def attempt(with_rehome):
+    def attempt(with_rehome, with_short):
         before = _book_state()
-        new_deal = edit_deal(deal_id, changes, rehome=with_rehome)
+        new_deal = edit_deal(deal_id, changes, rehome=with_rehome, allow_short=with_short)
         return {"deal": new_deal, "effects": _effects(before, _book_state())}
 
-    out = {"needs_rehome": False, "rehome_grams": 0, "error": None}
-    try:
-        out.update(dry_run(lambda: attempt(rehome)))
-    except RehomeNeeded as need:
-        out.update({"needs_rehome": True, "rehome_grams": need.grams, "reason": str(need)})
-        try:
-            out.update(dry_run(lambda: attempt(True)))
-        except DealError as exc:
-            out["error"] = str(exc)
-    except DealError as exc:
-        out["error"] = str(exc)
+    out = {"needs_rehome": False, "rehome_grams": 0, "needs_short": False, "short_grams": 0, "error": None}
+    _consenting(attempt, out, rehome, allow_short)
     try:
         new = _clean(old, changes)
     except DealError:
@@ -511,20 +530,11 @@ def preview_cancel(deal_id: int) -> Dict[str, Any]:
     if row is None:
         raise DealError("Deal not found")
 
-    def attempt(rehome):
+    def attempt(rehome, _short):
         before = _book_state()
         deals_svc.cancel_deal(deal_id, reason="preview", rehome=rehome)
         return {"effects": _effects(before, _book_state())}
 
-    out = {"needs_rehome": False, "error": None}
-    try:
-        out.update(dry_run(lambda: attempt(False)))
-    except RehomeNeeded as need:
-        out.update({"needs_rehome": True, "rehome_grams": need.grams, "reason": str(need)})
-        try:
-            out.update(dry_run(lambda: attempt(True)))
-        except DealError as exc:
-            out["error"] = str(exc)
-    except DealError as exc:
-        out["error"] = str(exc)
+    out = {"needs_rehome": False, "rehome_grams": 0, "needs_short": False, "short_grams": 0, "error": None}
+    _consenting(attempt, out)
     return out
