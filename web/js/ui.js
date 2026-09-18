@@ -48,19 +48,39 @@ export const mount = (node, ...children) => { node.textContent = ''; add(node, c
 export const $ = sel => document.querySelector(sel);
 
 // ---------------------------------------------------------------- toast
-let toastTimer = null;
+// Every notice keeps its own deadline. They used to share one timer, so a
+// second notice (say "Sauda message copied") cancelled the first one's timer
+// and an "Undo" notice then stayed on screen until it was tapped. A phone that
+// goes off to WhatsApp and comes back may have had its timers frozen, so on
+// return anything past its deadline is closed straight away. Tapping a notice
+// dismisses it; no more than three are ever stacked.
 export function toast(message, { kind = 'ok', action = null, actionLabel = 'Undo', ms = 6000 } = {}) {
   const host = $('#toasts');
-  const el = h('div', { class: `toast toast-${kind}` },
+  const expires = Date.now() + ms;
+  let timer = null;
+  const el = h('div', { class: `toast toast-${kind}`, onclick: () => close() },
     h('span', { class: 'toast-msg' }, message),
     action && h('button', {
       class: 'toast-action',
-      onclick: async () => { el.remove(); await action(); }
+      onclick: async e => { e.stopPropagation(); close(); await action(); }
     }, actionLabel)
   );
+  function close() {
+    clearTimeout(timer);
+    document.removeEventListener('visibilitychange', recheck);
+    el.remove();
+  }
+  function recheck() {
+    if (document.hidden) return;
+    const left = expires - Date.now();
+    if (left <= 0) close();
+    else { clearTimeout(timer); timer = setTimeout(close, left); }
+  }
+  el.close = close;
   host.appendChild(el);
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.remove(), ms);
+  while (host.children.length > 3) host.firstElementChild.close ? host.firstElementChild.close() : host.firstElementChild.remove();
+  timer = setTimeout(close, ms);
+  document.addEventListener('visibilitychange', recheck);
   return el;
 }
 
