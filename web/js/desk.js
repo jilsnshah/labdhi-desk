@@ -127,14 +127,15 @@ function positionCard(p, ctx) {
         h('span', {}, `${p.open_lots} lot${p.open_lots === 1 ? '' : 's'}` +
           (p.short_g ? ` · ${f.qty(p.short_g)} sold short` : '')))),
     whTags(p.warehouses),
-    ladder(p),
+    p.lots.length ? ladder(p)
+      : h('div', { class: 'ladder short-bar' }, h('span', {}, `${f.qty(p.short_g)} sold short — waiting for stock`)),
     h('div', { class: 'ladder-legend' },
       ...p.lots.slice(0, 4).map(l => h('span', {},
         h('i', { style: { background: costTint(l.rate_paise, p.cost_low_paise, p.cost_high_paise) } }),
         `${l.supplier_name} ${f.qty(l.available_g, { short: true })} @ ${f.rate(l.rate_paise)}`)),
       p.lots.length > 4 ? h('span', { class: 'dim' }, `+${p.lots.length - 4} more`) : null),
     h('div', { class: 'pos-foot' },
-      h('div', { class: 'stat' }, h('b', { class: 'num' }, f.rate(p.cost_paise)), h('span', {}, 'avg cost')),
+      h('div', { class: 'stat' }, h('b', { class: 'num' }, p.lots.length ? f.rate(p.cost_paise) : '—'), h('span', {}, 'avg cost')),
       h('div', { class: 'stat' },
         h('b', { class: 'num' }, p.mark_paise ? f.rate(p.mark_paise) : '—'), h('span', {}, 'mark')),
       h('div', { class: 'stat' },

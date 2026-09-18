@@ -27,7 +27,9 @@ export function renderStock(root, ctx) {
       h('div', { class: 'wh-name' }, w.name),
       h('div', { class: 'wh-addr' }, w.address || 'no address'),
       h('div', { class: 'wh-num num' + f.neg(w.stock_g) }, f.qty(w.stock_g)),
-      h('div', { class: 'wh-sub' }, `${f.inr(w.stock_value_paise, { compact: true })} · ${w.products} product${w.products === 1 ? '' : 's'}`)),
+      h('div', { class: 'wh-sub' + (w.short_g ? ' neg' : '') }, w.short_g && !w.products ? `${f.qty(w.short_g)} sold short`
+        : `${f.inr(w.stock_value_paise, { compact: true })} · ${w.products} product${w.products === 1 ? '' : 's'}` +
+          (w.short_g ? ` · ${f.qty(w.short_g)} short` : ''))),
     empty: () => h('div', { class: 'empty small' }, 'No warehouses yet — add one to start receiving stock.')
   });
 
@@ -88,8 +90,8 @@ function stockRow(r, after) {
     h('td', { class: 'r mono strong' + f.neg(r.stock_g), title: r.short_g ? `${f.qty(r.short_g)} sold short here` : null },
       f.mt(r.stock_g)),
     h('td', { class: 'r mono' }, r.lots),
-    h('td', { class: 'r mono' }, f.perKg(r.cost_paise)),
-    h('td', { class: 'r mono' }, f.inr(r.stock_value_paise, { compact: true })),
+    h('td', { class: 'r mono' }, r.lots ? f.perKg(r.cost_paise) : '—'),
+    h('td', { class: 'r mono' }, r.lots ? f.inr(r.stock_value_paise, { compact: true }) : h('span', { class: 'neg' }, 'sold short')),
     h('td', { class: 'r mono' }, r.mark_paise ? f.perKg(r.mark_paise) : '—'));
   tr.addEventListener('click', async () => {
     if (open) { open.remove(); open = null; tr.classList.remove('open'); return; }
@@ -103,6 +105,7 @@ function stockRow(r, after) {
 // ledger with a running balance that ends at today's figure.
 export async function stockDetail(r, after) {
   const { items: lots } = await api.lots(r.product_id, r.warehouse_id);
+  const shorts = r.short_g ? (await api.position(r.product_id)).shorts.filter(s => s.warehouse_id === r.warehouse_id) : [];
   const ledger = pagedList({
     pageSize: 10, className: 'ledger',
     head: ['Date', 'Movement', 'Ref', 'Counterparty / note', { label: 'In', cls: 'r' },
@@ -113,7 +116,13 @@ export async function stockDetail(r, after) {
   ledger.reload({});
   return h('div', { class: 'detail' },
     h('div', { class: 'lineage-title' }, `${r.product} in ${r.warehouse}`),
-    h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl lots' },
+    shorts.length ? h('div', { class: 'lineage' },
+      h('div', { class: 'lineage-title' }, `Sold short here — the next stock into ${r.warehouse} covers these, oldest first`),
+      ...shorts.map(s => h('div', { class: 'lin' },
+        h('i', { class: 'pipe', style: { background: 'var(--down)' } }),
+        h('b', { class: 'neg' }, f.qty(s.uncovered_g)), h('span', { class: 'muted' }, 'owed to'), h('b', {}, s.party_name),
+        h('span', { class: 'dim num' }, `${s.ref} · ${f.date(s.deal_date)} · sold @ ${f.rate(s.rate_paise)}`)))) : null,
+    !lots.length ? null : h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl lots' },
       h('thead', {}, h('tr', {}, ...['Purchase', 'Supplier', 'Date', 'Cost (₹/kg)', 'Bought', 'Left', ''].map(c => h('th', {}, c)))),
       h('tbody', {}, ...lots.map(l => h('tr', {},
         h('td', { class: 'mono' }, l.deal_ref, l.parent_lot_id ? h('small', {}, 'moved in') : null),

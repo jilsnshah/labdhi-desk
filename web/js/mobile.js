@@ -127,9 +127,10 @@ export async function renderMobileStock(root, appCtx) {
     row: r => h('button', { class: 'mflow-card mcard-btn', onclick: () => { st.detail = r; renderMobileStock(root, ctx); } },
       h('div', { class: 'mflow-head' },
         h('div', { class: 'grow' }, h('b', {}, `${r.material} ${r.grade} · ${r.manufacturer}`),
-          h('span', {}, `${r.warehouse} · ${r.lots} lot${r.lots === 1 ? '' : 's'} · cost ${f.rate(r.cost_paise)}`)),
+          h('span', {}, r.lots ? `${r.warehouse} · ${r.lots} lot${r.lots === 1 ? '' : 's'} · cost ${f.rate(r.cost_paise)}`
+                               : `${r.warehouse} · sold short, waiting for stock`)),
         h('div', { class: 'mflow-money' }, h('b', { class: 'num' + f.neg(r.stock_g) }, r.short_g ? `${f.qty(r.stock_g)} short` : f.qty(r.stock_g)),
-          h('span', {}, f.inr(r.stock_value_paise, { compact: true }))))),
+          h('span', {}, r.lots ? f.inr(r.stock_value_paise, { compact: true }) : '')))),
     empty: () => h('div', { class: 'empty' }, h('h3', {}, 'Nothing in stock here'))
   });
   const reload = () => list.reload({ q: st.q, warehouse_id: st.warehouse_id });
@@ -159,7 +160,9 @@ async function stockItem(root, st) {
     pageSize: 15, load: p => api.moves({ ...p, product_id: r.product_id, warehouse_id: r.warehouse_id }),
     row: m => ledgerCard(m)
   });
-  const here = lots.reduce((s, l) => s + l.available_g, 0);
+  const shorts = (await api.position(r.product_id)).shorts.filter(s => s.warehouse_id === r.warehouse_id);
+  const owed = shorts.reduce((s, x) => s + x.uncovered_g, 0);
+  const here = lots.reduce((s, l) => s + l.available_g, 0) - owed;
   mount(root, h('div', { class: 'view' },
     h('div', { class: 'mflow', style: { paddingTop: '14px' } },
       h('button', { class: 'mmore', style: { marginBottom: '12px' }, onclick: () => { st.detail = null; renderMobileStock(root, ctx); } },
@@ -167,9 +170,15 @@ async function stockItem(root, st) {
       h('div', { class: 'mpos-hero' },
         h('b', {}, r.product),
         h('div', { class: 'mpos-hero-row' },
-          heroStat('Warehouse', r.warehouse), heroStat('In stock', f.qty(here)),
-          heroStat('Avg cost', f.rate(r.cost_paise)), heroStat('Value', f.inr(r.stock_value_paise, { compact: true }))))),
-    h('div', { class: 'mflow' }, label('Lots here'),
+          heroStat('Warehouse', r.warehouse), heroStat('In stock', f.qty(here), here < 0 ? 'down' : ''),
+          heroStat('Avg cost', lots.length ? f.rate(r.cost_paise) : '—'),
+          heroStat('Value', lots.length ? f.inr(r.stock_value_paise, { compact: true }) : '—')))),
+    shorts.length ? h('div', { class: 'mflow' }, label('Sold short here', h('span', { class: 'neg' }, f.qty(owed))),
+      h('div', { class: 'mt-hint' }, `The next stock into ${r.warehouse} covers these, oldest first.`),
+      ...shorts.map(s => h('div', { class: 'mflow-card' }, h('div', { class: 'mflow-head' },
+        h('div', { class: 'grow' }, h('b', {}, s.party_name), h('span', {}, `${s.ref} · sold @ ${f.rate(s.rate_paise)}`)),
+        h('div', { class: 'mflow-money' }, h('b', { class: 'num neg' }, `−${f.qty(s.uncovered_g)}`)))))) : null,
+    h('div', { class: 'mflow' }, lots.length ? label('Lots here') : null,
       ...lots.map(l => lotCard({ ...l, product: r.product }, after)),
       label('Ledger'), ledger.el)));
   ledger.reload({});
@@ -217,11 +226,11 @@ export async function renderMobilePosition(root, productId, appCtx) {
       h('div', { class: 'mpos-hero' },
         h('b', {}, p.product.display),
         h('div', { class: 'mpos-hero-row' },
-          heroStat('In stock', f.qty(p.stock_g), p.stock_g < 0 ? 'down' : ''), heroStat('Avg cost', f.rate(p.cost_paise)),
+          heroStat('In stock', f.qty(p.stock_g), p.stock_g < 0 ? 'down' : ''), heroStat('Avg cost', open.length ? f.rate(p.cost_paise) : '—'),
           heroStat('Mark', p.mark_paise ? f.rate(p.mark_paise) : '—'),
           heroStat('Open P&L', f.inr(p.unrealised_paise, { sign: true, compact: true }), p.unrealised_paise >= 0 ? 'up' : 'down')),
         p.warehouses.length ? h('div', { class: 'mdeal-meta' },
-          ...p.warehouses.map(w => h('span', {}, `${w.name} ${f.qty(w.stock_g)}`))) : null),
+          ...p.warehouses.map(w => h('span', { class: f.neg(w.stock_g).trim() }, `${w.name} ${f.qty(w.stock_g)}`))) : null),
       h('button', { class: 'dock-btn sell', style: { marginTop: '12px', width: '100%' },
         onclick: () => ctx.trade('sell', { product: { id: productId, display: p.product.display } }) }, '↑ Sell this product')),
     p.shorts.length ? h('div', { class: 'mflow' }, label('Sold short', h('span', { class: 'neg' }, f.qty(p.short_g))),

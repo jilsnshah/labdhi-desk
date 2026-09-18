@@ -48,11 +48,15 @@ function sheet(title, sub, ...content) {
   const result = new Promise(r => { done = r; });
   const onKey = e => { if (e.key === 'Escape') close(null); };
   const close = value => { overlay.remove(); document.removeEventListener('keydown', onKey); done(value); };
+  // the details scroll; the title and the buttons stay put, on any screen
+  const parts = content.map(c => (typeof c === 'function' ? c(close) : c));
+  const foot = parts.pop();
   const card = h('div', { class: 'modal-card review-card' },
     h('div', { class: 'modal-head' },
       h('div', {}, h('div', { class: 'modal-title' }, title), sub ? h('div', { class: 'modal-sub' }, sub) : null),
       h('button', { type: 'button', class: 'modal-x', onclick: () => close(null) }, '×')),
-    ...content.map(c => (typeof c === 'function' ? c(close) : c)));
+    h('div', { class: 'review-body' }, ...parts),
+    foot);
   const overlay = h('div', { class: 'modal', onmousedown: e => { if (e.target === overlay) close(null); } }, card);
   document.addEventListener('keydown', onKey);
   document.body.appendChild(overlay);

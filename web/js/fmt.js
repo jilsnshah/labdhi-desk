@@ -7,6 +7,13 @@ export const kg = g => (g || 0) / KG;
 // stock below zero is sold short: shown in red wherever stock is shown
 export const neg = g => ((g || 0) < 0 ? ' neg' : '');
 
+// A purchase just booked goes first to whatever was sold short in its warehouse.
+export function coveredNote(deal) {
+  if (!deal || deal.side !== 'buy' || !deal.sold_g) return '';
+  const refs = [...new Set((deal.sold || []).map(s => s.sale_ref))].join(', ');
+  return ` · covered ${qty(deal.sold_g)} sold short (${refs})`;
+}
+
 export function qty(g, opts = {}) {
   const t = (g || 0) / TON;
   if (Math.abs(t) >= 1 || g === 0) {

@@ -20,6 +20,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m tests.test_cancel        # cancel/undo puts every figure back exactly
 .venv/bin/python -m tests.test_edit          # an edited deal equals one booked that way from the start
 .venv/bin/python -m tests.test_shorts        # sell short then buy equals buy then sell, every way round
+.venv/bin/python -m tests.test_short_chains  # long trade chains with shorts, every figure worked by hand
 ```
 
 Every test module also runs against Postgres: `DATABASE_URL=postgres://... python -m tests.<module>`.

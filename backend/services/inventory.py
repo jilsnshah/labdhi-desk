@@ -195,7 +195,7 @@ def position_detail(product_id: int) -> Optional[Dict[str, Any]]:
     cost = weighted_rate([(l["available_g"], l["rate_paise"]) for l in lots if l["available_g"] > 0])
     mark = db.q1("SELECT * FROM marks WHERE product_id=?", (product_id,))
     open_shorts = db.dicts(db.q(
-        """SELECT d.id, d.ref, d.deal_date, d.qty_g, d.uncovered_g, d.rate_paise, p.name AS party_name,
+        """SELECT d.id, d.ref, d.deal_date, d.qty_g, d.uncovered_g, d.rate_paise, d.warehouse_id, p.name AS party_name,
                   w.name AS warehouse
            FROM deals d JOIN parties p ON p.id = d.party_id JOIN warehouses w ON w.id = d.warehouse_id
            WHERE d.product_id = ? AND d.side = 'sell' AND d.status = 'booked' AND d.uncovered_g > 0

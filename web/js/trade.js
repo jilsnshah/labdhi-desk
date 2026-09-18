@@ -168,7 +168,7 @@ async function loadWarehouses(auto = false, append = false) {
   const sell = state.side === 'sell';
   const offset = append ? state.whs.items.length : 0;
   let r = await (sell
-    ? api.warehouses({ product_id: state.product.id, in_stock: !state.shortOK, limit: 50 })
+    ? api.warehouses({ product_id: state.product.id, in_stock: !(state.shortOK || state.edit), limit: 50 })
     : api.warehouses({ q: state.whQ, limit: 12, offset })).catch(() => null);
   if (!state || !r || my !== seq.wh) return;
   if (sell && !r.items.length && !state.shortOK) {
@@ -383,7 +383,7 @@ function blockProduct() {
     const where = (state.position ? state.position.warehouses : [])
       .map(w => `${w.name} ${f.qty(w.stock_g, { short: true })}`).join(' · ');
     return h('div', { class: 'block' }, label('Product', true,
-      p.stock_g ? `you hold ${f.qty(p.stock_g)}` : 'none in stock yet'),
+      p.stock_g > 0 ? `you hold ${f.qty(p.stock_g)}` : p.stock_g < 0 ? `${f.qty(-p.stock_g)} sold short` : 'none in stock yet'),
       picked(p.display, where || (p.packing || ''), clearProduct));
   }
   const q = state.productQ.trim();
@@ -457,7 +457,7 @@ function blockWarehouse() {
         sell ? h('small', {}, w.product_stock_g > 0 ? f.qty(w.product_stock_g, { short: true }) : 'none · short')
              : (w.id === last ? h('small', {}, 'last used') : null))),
       sell && !items.length ? h('span', { class: 'dim' }, 'No warehouse holds this product.') : null,
-      sell && !state.shortOK ? h('button', { class: 'chip ghost', onclick: () => { state.shortOK = true; loadWarehouses(); } },
+      sell && !state.shortOK && !state.edit ? h('button', { class: 'chip ghost', onclick: () => { state.shortOK = true; loadWarehouses(); } },
         'Sell short from another warehouse') : null),
     h('div', { class: 'block-actions' },
       !sell && items.length < total ? h('button', { class: 'chip small', onclick: () => loadWarehouses(false, true) },
@@ -868,7 +868,7 @@ async function confirm() {
       `${deal.ref} · ${deal.party_name}`, sell ? 'sell' : 'buy');
     toast(sell
       ? `Sold ${f.qty(deal.qty_g)} ${deal.product} to ${deal.party_name} from ${deal.warehouse}`
-      : `Bought ${f.qty(deal.qty_g)} ${deal.product} from ${deal.party_name} into ${deal.warehouse}`,
+      : `Bought ${f.qty(deal.qty_g)} ${deal.product} from ${deal.party_name} into ${deal.warehouse}${f.coveredNote(deal)}`,
       { action: async () => { await api.undo(); toast('Reversed'); ctx.refresh(); } });
     state = null;
     ctx.go('desk');

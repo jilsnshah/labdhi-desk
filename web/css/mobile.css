@@ -605,6 +605,8 @@ body.phone.trading #toasts { bottom: calc(90px + env(safe-area-inset-bottom, 0px
 .mflow-top b { flex: 1; font-size: 15px; font-weight: 700; }
 .mexport { padding: 9px 13px; border-radius: 11px; background: #107c41; color: #fff; font-weight: 680; font-size: 13.5px; white-space: nowrap; }
 @media (max-width: 760px) {
-  .modal-card.review-card { overflow-y: auto; }
-  .modal-card.review-card .modal-foot { position: sticky; bottom: 0; background: var(--surface); }
+  .modal-card.review-card { overflow: hidden; }
+  .modal-card.review-card .modal-foot { position: static; flex: none; padding: 10px 0 0; margin: 0; border-top: 1px solid var(--line); }
 }
+.mt-hint.neg, .mflow-empty.neg { color: var(--down); font-weight: 600; }
+.mdeal-meta span.neg { color: var(--down); font-weight: 650; }
