@@ -91,8 +91,18 @@ Invariants, enforced by tests on SQLite and Postgres:
 
 Every booking, transfer and adjustment can be undone while nothing depends on it:
 
-- A purchase that was sold or moved can't be cancelled.
+- A purchase that was moved can't be cancelled. One that was sold can be cancelled only by moving
+  those sales onto other stock of the same product in the same warehouse (they keep their Sauda
+  No., buyer and rate; only their cost and margin change), and only if that stock exists.
 - A transfer whose stock was sold can't be undone.
+
+A booked sauda can be edited (`services/revise.py`). Paperwork changes in place. A sale's rate
+re-prices its allocations; its quantity, warehouse, product or lots re-allocate it in one
+transaction, keeping its Sauda No. A purchase's rate re-prices every sale drawn on it; its
+quantity may drop to what is sold (lower moves sales onto other stock); its product or warehouse
+change only if none of it was transferred. Every edit ends where booking it that way from the
+start would have: `tests/test_edit` builds both books and compares every figure. The screen
+previews an edit by running it and rolling it back, so the preview is what Save does.
 
 ## Lists and pagination
 

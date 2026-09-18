@@ -10,6 +10,7 @@ import { showNode } from './flow.js';
 import { transferForm, adjustForm } from './forms.js';
 import { sendSauda } from './whatsapp.js';
 import { exportButton } from './export.js';
+import { cancelWithReview } from './edit.js';
 
 const COLUMNS = ['Sauda No.', 'Date', 'Type', 'Party', 'Product / Grade',
   { label: 'Qty (MT)', cls: 'r' }, { label: 'Rate (₹/kg)', cls: 'r' }, 'Warehouse', 'Status', 'Delivery',
@@ -149,11 +150,12 @@ export function dealDetail(deal, ctx, reload) {
 
     h('div', { class: 'chips', style: { marginTop: '14px' } },
       deal.status === 'booked' ? h('button', {
+        class: 'chip on', onclick: e => { e.stopPropagation(); ctx.editDeal(deal); }
+      }, '✎ Edit') : null,
+      deal.status === 'booked' ? h('button', {
         class: 'chip', onclick: async e => {
           e.stopPropagation();
-          if (!window.confirm(`Cancel ${deal.ref}? Stock goes back the way it was.`)) return;
-          try { await api.cancel(deal.id); toast('Cancelled ' + deal.ref); reload && reload(); ctx.refresh(); }
-          catch (err) { toast(err.message, { kind: 'err', ms: 9000 }); }
+          if (await cancelWithReview(deal, ctx)) { reload && reload(); ctx.refresh(); }
         }
       }, '✕ Cancel deal') : null,
       deal.status === 'booked' ? h('button', { class: 'chip wa', onclick: e => { e.stopPropagation(); sendSauda(deal, (ctx.boot && ctx.boot.settings && ctx.boot.settings.company_name)); } },

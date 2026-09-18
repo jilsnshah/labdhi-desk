@@ -15,6 +15,7 @@ import { MOVE_LABEL } from './stock.js';
 import { flowExportButton } from './flow.js';
 import { exportButton } from './export.js';
 import { sendSauda } from './whatsapp.js';
+import { cancelWithReview } from './edit.js';
 
 let ctx = null;
 
@@ -328,12 +329,11 @@ function dealCard(d, reload) {
         onclick: () => sendSauda(full, (ctx.boot && ctx.boot.settings && ctx.boot.settings.company_name))
       }, 'Send on WhatsApp') : null,
       full.status === 'booked' ? h('button', {
+        class: 'mmore', style: { marginTop: '10px' }, onclick: () => ctx.editDeal(full)
+      }, 'Edit this deal') : null,
+      full.status === 'booked' ? h('button', {
         class: 'mmore', style: { marginTop: '10px' },
-        onclick: async () => {
-          if (!window.confirm(`Cancel ${full.ref}?`)) return;
-          try { await api.cancel(full.id); toast('Cancelled ' + full.ref); reload(); ctx.refresh(); }
-          catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
-        }
+        onclick: async () => { if (await cancelWithReview(full, ctx)) { reload(); ctx.refresh(); } }
       }, 'Cancel this deal') : null);
     card.appendChild(open);
   };

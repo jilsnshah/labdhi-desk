@@ -18,6 +18,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m tests.test_migrate       # a v1 book upgrades without losing a row
 .venv/bin/python -m tests.test_api           # every endpoint, every list is a page
 .venv/bin/python -m tests.test_cancel        # cancel/undo puts every figure back exactly
+.venv/bin/python -m tests.test_edit          # an edited deal equals one booked that way from the start
 ```
 
 Every test module also runs against Postgres: `DATABASE_URL=postgres://... python -m tests.<module>`.
@@ -59,8 +60,14 @@ warehouse or it does not book. `allow_short_sales` stays `0`.
 **6. Everything is reversible.** Booking, transferring and adjusting each write
 an undoable event; `U` or the toast reverses the last one. Cancelling a sale
 hands the exact grams back to the exact lots they came from. Cancelling a
-*purchase* whose stock is already sold or moved is refused, and the error names
-what blocks it.
+*purchase* whose stock is already sold can move those sales onto other stock
+of the same product in the same warehouse (shown before and after, sale by
+sale); if there is not enough, or some of it was moved, it is refused and the
+error names what blocks it.
+
+**7. Deals can be edited.** Edit on a booked deal opens its ticket filled in.
+Nothing is saved until the review shows every change and every sale whose
+margin moves. The Sauda No. stays; WhatsApp gets a revised confirmation.
 
 ---
 
@@ -199,12 +206,14 @@ backend/
     stock.py          lots, stock by warehouse, ledger, transfers, adjustments
     allocation.py     the engine
     deals.py          lifecycle: draft → booked → cancelled
+    revise.py         editing a booked deal; moving sales onto other stock
     inventory.py      positions, lineage graph
     dashboard.py      summary, attention, counterparties
 web/js/
   lists.js            the one paged list
   forms.js            the one form engine + every record form and picker
-  trade.js / mticket.js   desktop / phone ticket
+  trade.js / mticket.js   desktop / phone ticket (also edits a booked deal)
+  edit.js             review of an edit or a cancel before it is saved
   desk, stock, flow, tape, setup .js   desktop screens;  mobile.js  phone screens
 tests/                engine, stock, fields, parties, migrate, api (+ fixtures/)
 ```

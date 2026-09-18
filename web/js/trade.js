@@ -15,6 +15,7 @@ import * as f from './fmt.js';
 import { api } from './api.js';
 import { partyForm, productForm, warehouseForm, pickParty, partySub } from './forms.js';
 import { sendSauda } from './whatsapp.js';
+import { diffDeal, reviewEdit } from './edit.js';
 
 const MT = 1e6;
 const rnd = n => (n < 0 ? -Math.round(-n) : Math.round(n));
@@ -51,12 +52,41 @@ export function startTrade(side, opts = {}, appCtx = {}) {
     sauda_no: '', saudaAuto: true,
     plus_gst: true, payment_due: '', ex_place: '',
     rateInvalid: false, rateText: '',
-    date: f.today()
+    date: f.today(),
+    edit: opts.edit || null           // a booked deal being changed
   };
   loadParties();
   loadLevels();
+  if (state.edit) { prefill(state.edit); return; }
   refreshSauda(true);
   if (opts.product && opts.product.id) chooseProduct(opts.product.id);
+}
+
+// Editing: the ticket opens with the deal as booked. On a sale, the lots it
+// draws on count as free (it gives them back when re-split) and start at the
+// amounts it holds, so an untouched split saves as it was.
+async function prefill(d) {
+  const my = state;
+  Object.assign(state, {
+    party: { id: d.party_id, name: d.party_name, gstin: d.party_gstin },
+    rate_paise: d.rate_paise, plus_gst: !!d.plus_gst, date: d.deal_date,
+    sauda_no: d.ref, saudaAuto: false,
+    payment_due: d.payment_due || '', ex_place: d.ex_place || '',
+    transporter: d.transporter_id ? { id: d.transporter_id, name: d.transporter_name } : null,
+    terms: { freight_by: d.freight_by || '', delivery_by: d.delivery_by || '', payment_terms: d.payment_terms || '',
+             eway: d.eway || '', remarks: d.remarks || '' }
+  });
+  state.termsOpen = !!(d.transporter_id || d.freight_by || d.delivery_by || d.payment_terms || d.eway || d.remarks || d.payment_due);
+  await chooseProduct(d.product_id, { auto: false });
+  if (state !== my) return;
+  await chooseWarehouse({ id: d.warehouse_id, name: d.warehouse });
+  if (state !== my) return;
+  state.qty_g = d.qty_g;
+  if (d.side === 'sell') {
+    resetAlloc();
+    for (const a of d.allocations || []) state.alloc[a.lot_id] = (state.alloc[a.lot_id] || 0) + a.qty_g;
+  }
+  render();
 }
 
 export function renderTrade(mountNode) {
@@ -99,7 +129,7 @@ const productTyped = debounce(async () => {
   render();
 }, 200);
 
-async function chooseProduct(id) {
+async function chooseProduct(id, { auto = true } = {}) {
   const pos = await api.position(id).catch(() => null);
   if (!state || !pos) return;
   state.position = pos;
@@ -114,7 +144,7 @@ async function chooseProduct(id) {
       : (pos.mark_paise || (pos.cost_paise ? pos.cost_paise + 300 : 0));
   }
   render();
-  loadWarehouses(true);
+  await loadWarehouses(auto);
 }
 
 function clearProduct() {
@@ -143,7 +173,7 @@ async function chooseWarehouse(w) {
   state.warehouse = w;
   resetAlloc();
   if (state.side === 'sell') {
-    const r = await api.lots(state.product.id, w.id).catch(() => ({ items: [] }));
+    const r = await api.lots(state.product.id, w.id, state.edit ? state.edit.id : undefined).catch(() => ({ items: [] }));
     if (!state) return;
     state.lots = r.items;
     resetAlloc();
@@ -234,10 +264,11 @@ function render() {
   mount(root,
     h('div', { class: 'trade-screen ' + state.side },
       h('div', { class: 'trade-head' },
-        h('div', { class: 'trade-kind' }, sell ? 'SELL' : 'BUY'),
-        h('div', { class: 'trade-sub' }, sell ? 'stock out of one warehouse · margin booked'
-                                              : 'stock into one warehouse'),
-        h('button', { class: 'trade-back', onclick: () => ctx.go('desk') }, 'Cancel')),
+        h('div', { class: 'trade-kind' }, state.edit ? `EDIT ${state.edit.ref}` : (sell ? 'SELL' : 'BUY')),
+        h('div', { class: 'trade-sub' }, state.edit
+          ? `${sell ? 'sale' : 'purchase'} · nothing is saved until you review the changes`
+          : (sell ? 'stock out of one warehouse · margin booked' : 'stock into one warehouse')),
+        h('button', { class: 'trade-back', onclick: () => ctx.go(state.edit ? 'tape' : 'desk') }, 'Cancel')),
       blockSauda(),
       blockParty(),
       blockProduct(),
@@ -266,6 +297,12 @@ const picked = (name, sub, onChange) => h('div', { class: 'picked' },
   h('button', { onclick: onChange }, 'Change'));
 
 function blockSauda() {
+  if (state.edit) {
+    return h('div', { class: 'sauda-row' },
+      h('span', { class: 'sauda-label' }, 'Sauda No.'),
+      h('b', { class: 'num sauda-input' }, state.edit.ref),
+      h('span', { class: 'dim', style: { fontSize: '13px' } }, 'stays the same'));
+  }
   return h('div', { class: 'sauda-row' },
     h('span', { class: 'sauda-label' }, 'Sauda No.'),
     h('input', {
@@ -704,7 +741,8 @@ function paintBar(fl) {
   r.line.textContent = line.text;
   r.line.className = 'rb-line' + (line.err ? ' err' : '');
   r.btn.disabled = !canBook();
-  r.btn.textContent = state.busy ? 'Booking…' : (sell ? 'Book sale' : 'Book purchase');
+  r.btn.textContent = state.edit ? (state.busy ? 'Checking…' : 'Review changes')
+    : state.busy ? 'Booking…' : (sell ? 'Book sale' : 'Book purchase');
 }
 
 function lineText(fl, value) {
@@ -726,8 +764,33 @@ function lineText(fl, value) {
 }
 
 // ---------------------------------------------------------------- commit
+function ticketValues() {
+  return {
+    party_id: state.party.id, product_id: state.product.id, warehouse_id: state.warehouse.id,
+    qty_g: state.qty_g, rate_paise: state.rate_paise, deal_date: state.date, plus_gst: !!state.plus_gst,
+    payment_due: state.payment_due, ex_place: state.ex_place,
+    transporter_id: state.transporter ? state.transporter.id : null,
+    freight_by: state.terms.freight_by, delivery_by: state.terms.delivery_by,
+    payment_terms: state.terms.payment_terms, eway: state.terms.eway, remarks: state.terms.remarks
+  };
+}
+
+async function saveEdit() {
+  const fl = sellSide() ? flow() : null;
+  const changes = diffDeal(state.edit, ticketValues(), fl ? fl.rows.map(r => ({ lot_id: r.lot.id, qty_g: r.take })) : null);
+  state.busy = true; state.error = ''; render();
+  const saved = await reviewEdit(state.edit, changes, ctx);
+  if (!state) return;
+  state.busy = false;
+  if (!saved) { render(); return; }
+  state = null;
+  ctx.go('tape');
+  ctx.refresh();
+}
+
 async function confirm() {
   if (!canBook()) return;
+  if (state.edit) return saveEdit();
   const sell = sellSide();
   const fl = sell ? flow() : null;
   state.busy = true; state.error = ''; render();

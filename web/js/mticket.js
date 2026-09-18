@@ -13,6 +13,7 @@ import * as f from './fmt.js';
 import { api } from './api.js';
 import { openForm, partyForm, productForm, warehouseForm, pickParty, partySub } from './forms.js';
 import { sendSauda } from './whatsapp.js';
+import { diffDeal, reviewEdit } from './edit.js';
 
 const MT = 1e6;
 const rnd = n => (n < 0 ? -Math.round(-n) : Math.round(n));
@@ -42,16 +43,48 @@ export function startTicket(side, opts = {}, appCtx) {
     terms: { freight_by: '', delivery_by: '', payment_terms: '', eway: '', remarks: '' },
     sauda_no: '', saudaAuto: true,
     plus_gst: true, payment_due: '', ex_place: '',
-    date: f.today(), busy: false, error: '', stepIndex: 0
+    date: f.today(), busy: false, error: '', stepIndex: 0,
+    edit: opts.edit || null           // a booked deal being changed
   };
   document.body.classList.add('trading');
   screen = h('div', { class: 'mtrade ' + side });
   document.body.appendChild(screen);
   history.pushState({ ticket: true }, '');
   window.addEventListener('popstate', onPop);
+  if (ms.edit) { prefill(ms.edit); paint(); return; }
   refreshSauda(true);
   if (opts.product && opts.product.id) chooseProduct(opts.product.id, 2);
   loadStep();
+  paint();
+}
+
+// Editing opens on the review screen with the deal as booked; each row there
+// jumps to its step. A sale's own lots count as free and start at what it holds.
+async function prefill(d) {
+  const my = ms;
+  Object.assign(ms, {
+    party: { id: d.party_id, name: d.party_name, gstin: d.party_gstin },
+    rate_paise: d.rate_paise, plus_gst: !!d.plus_gst, date: d.deal_date,
+    sauda_no: d.ref, saudaAuto: false,
+    payment_due: d.payment_due || '', ex_place: d.ex_place || '',
+    transporter: d.transporter_id ? { id: d.transporter_id, name: d.transporter_name } : null,
+    terms: { freight_by: d.freight_by || '', delivery_by: d.delivery_by || '', payment_terms: d.payment_terms || '',
+             eway: d.eway || '', remarks: d.remarks || '' }
+  });
+  const pos = await api.position(d.product_id).catch(() => null);
+  if (ms !== my || !pos) return;
+  ms.position = pos;
+  ms.product = { ...pos.product, stock_g: pos.stock_g };
+  ms.warehouse = { id: d.warehouse_id, name: d.warehouse };
+  if (d.side === 'sell') {
+    const r = await api.lots(d.product_id, d.warehouse_id, d.id).catch(() => ({ items: [] }));
+    if (ms !== my) return;
+    ms.lots = r.items.slice().sort((a, b) => a.rate_paise - b.rate_paise);
+    ms.alloc = {};
+    for (const a of d.allocations || []) ms.alloc[a.lot_id] = (ms.alloc[a.lot_id] || 0) + a.qty_g;
+  }
+  ms.qty_g = d.qty_g;
+  ms.stepIndex = steps().indexOf('review');
   paint();
 }
 
@@ -156,7 +189,7 @@ async function chooseProduct(id, advanceTo = 1) {
 async function chooseWarehouse(w, auto = false) {
   ms.warehouse = w; ms.whAuto = auto; ms.alloc = {};
   if (ms.side === 'sell') {
-    const r = await api.lots(ms.product.id, w.id).catch(() => ({ items: [] }));
+    const r = await api.lots(ms.product.id, w.id, ms.edit ? ms.edit.id : undefined).catch(() => ({ items: [] }));
     if (!ms) return;
     ms.lots = r.items.slice().sort((a, b) => a.rate_paise - b.rate_paise);
     if (ms.qty_g > stockHere()) ms.qty_g = 0;
@@ -242,7 +275,7 @@ function paint() {
     h('div', { class: 'mt-head' },
       h('button', { class: 'mt-back', onclick: back }, '‹'),
       h('div', { class: 'mt-title' },
-        h('b', { class: 'mt-kind' }, ms.side === 'sell' ? 'Sell' : 'Buy'),
+        h('b', { class: 'mt-kind' }, ms.edit ? `Edit ${ms.edit.ref}` : (ms.side === 'sell' ? 'Sell' : 'Buy')),
         h('span', {}, crumbs())),
       h('button', { class: 'mt-back', onclick: () => closeTicket() }, '✕')),
     h('div', { class: 'mt-steps' }, ...steps().map((_, i) => h('i', { class: i <= stepIndex() ? 'done' : '' }))),
@@ -298,10 +331,11 @@ function stepWho() {
     search('Name, GSTIN or phone', 'who'),
     h('button', { class: 'mopt ghost', onclick: async () => {
       const p = await partyForm(null, { name: ms.query.trim() });
-      if (p && ms) { ms.party = p; next(); }
+      if (p && ms) { ms.party = p; if (ms.edit) jump('review'); else next(); }
     } }, '+ Add new party'),
     ...ms.list.items.map(p => h('button', {
-      class: 'mopt' + (ms.party && ms.party.id === p.id ? ' on' : ''), onclick: () => { ms.party = p; next(); }
+      class: 'mopt' + (ms.party && ms.party.id === p.id ? ' on' : ''),
+      onclick: () => { ms.party = p; if (ms.edit) jump('review'); else next(); }
     },
       h('div', { class: 'mopt-main' }, h('b', {}, p.name), h('span', {}, partySub(p))),
       p.last_deal ? h('span', { class: 'mopt-tag' }, f.ago(p.last_deal)) : null)),
@@ -541,15 +575,17 @@ function stepReview() {
   const marginRate = cost ? ms.rate_paise - cost : 0;
   const margin = valuePaise(ms.qty_g, marginRate);
   return [
-    h('div', { class: 'mt-q' }, sell ? 'Confirm the sale' : 'Confirm the purchase'),
-    h('div', { class: 'mt-hint' }, 'One tap to book. You can undo straight after.'),
+    h('div', { class: 'mt-q' }, ms.edit ? 'Change what you need' : (sell ? 'Confirm the sale' : 'Confirm the purchase')),
+    h('div', { class: 'mt-hint' }, ms.edit ? 'Tap a row to change it. You see every change before it is saved.'
+                                          : 'One tap to book. You can undo straight after.'),
     h('div', { class: 'mrev' },
-      row('Sauda No.', ms.sauda_no || '—', editSauda),
+      row('Sauda No.', ms.sauda_no || '—', ms.edit ? null : editSauda),
       row(sell ? 'Buyer' : 'Supplier', ms.party.name, () => jump('who')),
       row('Product', ms.product.display, () => jump('what')),
       row(sell ? 'Dispatch from' : 'Receive into', ms.warehouse.name, () => jump('where')),
       row('Quantity', f.qty(ms.qty_g), () => jump('qty')),
       row('Rate', f.rate(ms.rate_paise) + '/kg', () => jump('rate')),
+      ms.edit && sell && openLots().length > 1 ? row('Lots', splitSummary(), () => jump('split')) : null,
       row('GST', ms.plus_gst ? 'Extra' : 'Included', () => { ms.plus_gst = !ms.plus_gst; paint(); }),
       row('Value', f.inr(valuePaise(ms.qty_g, ms.rate_paise))),
       row('Date', f.date(ms.date), openTerms),
@@ -564,6 +600,11 @@ function stepReview() {
       : null,
     ms.error ? h('div', { class: 'need' }, ms.error) : null
   ];
+}
+
+function splitSummary() {
+  const used = flow().rows.filter(r => r.take > 0);
+  return used.map(r => `${f.qty(r.take, { short: true })} ${r.lot.supplier_name}`).join(' · ') || '—';
 }
 
 function termsSummary() {
@@ -656,7 +697,8 @@ function foot(step) {
   if (step === 'review') {
     return h('div', { class: 'mt-foot' },
       h('button', { class: 'mt-next', disabled: !ready() || ms.busy, onclick: book },
-        ms.busy ? 'Booking…' : (ms.side === 'sell' ? 'Book sale' : 'Book purchase')));
+        ms.edit ? (ms.busy ? 'Checking…' : 'Review changes')
+          : ms.busy ? 'Booking…' : (ms.side === 'sell' ? 'Book sale' : 'Book purchase')));
   }
   if (step === 'split') {
     if (ms.editingLot) {
@@ -689,8 +731,29 @@ function foot(step) {
 }
 
 // --------------------------------------------------------------- commit
+async function saveEdit() {
+  const d = ms.edit;
+  const changes = diffDeal(d, {
+    party_id: ms.party.id, product_id: ms.product.id, warehouse_id: ms.warehouse.id,
+    qty_g: ms.qty_g, rate_paise: ms.rate_paise, deal_date: ms.date, plus_gst: !!ms.plus_gst,
+    payment_due: ms.payment_due, ex_place: ms.ex_place,
+    transporter_id: ms.transporter ? ms.transporter.id : null,
+    freight_by: ms.terms.freight_by, delivery_by: ms.terms.delivery_by,
+    payment_terms: ms.terms.payment_terms, eway: ms.terms.eway, remarks: ms.terms.remarks
+  }, pins());
+  ms.busy = true; ms.error = ''; paint();
+  const saved = await reviewEdit(d, changes, ctx);
+  if (!ms) return;
+  ms.busy = false;
+  if (!saved) { paint(); return; }
+  closeTicket();
+  ctx.go('tape');
+  ctx.refresh();
+}
+
 async function book() {
   if (!ready() || ms.busy) return;
+  if (ms.edit) return saveEdit();
   ms.busy = true; ms.error = ''; paint();
   const sell = ms.side === 'sell';
   try {

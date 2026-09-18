@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import db, security
-from .services import (allocation, dashboard, deals, inventory, parties, products, report, stock,
+from .services import (allocation, dashboard, deals, inventory, parties, products, report, revise, stock,
                        warehouses)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -314,9 +314,10 @@ def list_stock(q: str = "", product_id: Optional[int] = None, warehouse_id: Opti
 
 
 @app.get("/api/stock/lots")
-def stock_lots(product_id: int, warehouse_id: Optional[int] = None):
-    """Every open lot of a product (in one warehouse) - the set a sale is split across."""
-    return {"items": stock.lots_for(product_id, warehouse_id)}
+def stock_lots(product_id: int, warehouse_id: Optional[int] = None, sale_id: Optional[int] = None):
+    """Every open lot of a product (in one warehouse) - the set a sale is split across.
+    With `sale_id` (a sale being edited), what that sale holds counts as free."""
+    return {"items": revise.lots_for_sale(product_id, warehouse_id, sale_id)}
 
 
 @app.get("/api/stock/moves")
@@ -410,6 +411,7 @@ class PreviewIn(BaseModel):
     rate_paise: int = 0
     policy: str = allocation.DEFAULT_POLICY
     pins: Optional[List[Dict[str, int]]] = None
+    sale_id: Optional[int] = None          # a sale being edited: its own stock counts as free
 
 
 class ReallocIn(BaseModel):
@@ -451,16 +453,65 @@ def reallocate(deal_id: int, body: ReallocIn) -> Dict[str, Any]:
 
 
 @app.post("/api/deals/{deal_id}/cancel")
-def cancel(deal_id: int, reason: str = "") -> Dict[str, Any]:
-    return deals.cancel_deal(deal_id, reason)
+def cancel(deal_id: int, reason: str = "", rehome: bool = False) -> Dict[str, Any]:
+    return deals.cancel_deal(deal_id, reason, rehome=rehome)
+
+
+@app.get("/api/deals/{deal_id}/cancel/preview")
+def cancel_preview(deal_id: int) -> Dict[str, Any]:
+    """What cancelling would do - and, for a purchase already sold, what moving
+    those sales onto other stock would do to them. Nothing is saved."""
+    return revise.preview_cancel(deal_id)
+
+
+class EditIn(BaseModel):
+    party_id: Optional[int] = None
+    product_id: Optional[int] = None
+    warehouse_id: Optional[int] = None
+    qty_g: Optional[int] = None
+    rate_paise: Optional[int] = None
+    plus_gst: Optional[bool] = None
+    deal_date: Optional[str] = None
+    payment_due: Optional[str] = None
+    ex_place: Optional[str] = None
+    transporter_id: Optional[int] = None
+    freight_by: Optional[str] = None
+    delivery_by: Optional[str] = None
+    payment_terms: Optional[str] = None
+    eway: Optional[str] = None
+    remarks: Optional[str] = None
+    pins: Optional[List[Dict[str, int]]] = None
+    rehome: bool = False
+
+
+def _edit_args(body: EditIn):
+    changes = body.dict(exclude_unset=True)
+    rehome = bool(changes.pop("rehome", False))
+    for k in ("party_id", "product_id", "warehouse_id", "qty_g", "rate_paise", "plus_gst", "deal_date"):
+        if k in changes and changes[k] is None:
+            changes.pop(k)
+    return changes, rehome
+
+
+@app.post("/api/deals/{deal_id}/edit")
+def edit(deal_id: int, body: EditIn) -> Dict[str, Any]:
+    changes, rehome = _edit_args(body)
+    return revise.edit_deal(deal_id, changes, rehome=rehome)
+
+
+@app.post("/api/deals/{deal_id}/edit/preview")
+def edit_preview(deal_id: int, body: EditIn) -> Dict[str, Any]:
+    """The edit, run and rolled back: what would change, sale by sale."""
+    changes, rehome = _edit_args(body)
+    return revise.preview_edit(deal_id, changes, rehome=rehome)
 
 
 @app.post("/api/preview/sell")
 def preview_sell(body: PreviewIn) -> Dict[str, Any]:
     """Live margin as the trader moves the quantity and rate. No writes."""
     plan = allocation.preview(body.product_id, body.qty_g, body.rate_paise, body.policy,
-                              pins=body.pins, warehouse_id=body.warehouse_id)
-    plan["lots"] = stock.lots_for(body.product_id, body.warehouse_id)
+                              pins=body.pins, warehouse_id=body.warehouse_id, ignore_sale_id=body.sale_id)
+    plan["lots"] = revise.lots_for_sale(body.product_id, body.warehouse_id, body.sale_id)
     return plan
 
 

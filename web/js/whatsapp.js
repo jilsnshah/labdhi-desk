@@ -39,7 +39,7 @@ const RULE = '──────────────';
 // The sauda confirmation as Labdhi Exim sends it. Every field keeps its line;
 // anything not recorded shows "—". Fields the deal carries beyond the standard
 // layout (e-way bill, warehouse, payment due date, note) are kept, not dropped.
-export function saudaMessage(deal, company) {
+export function saudaMessage(deal, company, { revised = false } = {}) {
   const sell = deal.side === 'sell';
   const firm = String(company || 'Labdhi Exim').toUpperCase();
   const kg = Math.round(deal.qty_g / 1000);
@@ -49,7 +49,7 @@ export function saudaMessage(deal, company) {
   const product = deal.manufacturer ? `${deal.material} (${deal.manufacturer})` : deal.material;
   return [
     `🏢 *${firm}*`,
-    '*SAUDA CONFIRMATION*',
+    revised ? '*REVISED SAUDA CONFIRMATION*' : '*SAUDA CONFIRMATION*',
     RULE,
     `📅 Date: ${dash(dmy(deal.deal_date))}`,
     `🔖 Sauda No.: ${dash(deal.ref)}`,
@@ -87,10 +87,10 @@ export function openWhatsApp(phone, text) {
 
 // The card shown after booking (auto = try to open WhatsApp straight away),
 // and from any deal in the tape.
-export async function sendSauda(deal, company, { auto = false, booked = auto } = {}) {
+export async function sendSauda(deal, company, { auto = false, booked = auto, revised = false } = {}) {
   let party = null;
   try { party = await api.party(deal.party_id); } catch (_) { /* send without a number */ }
-  const text = saudaMessage(deal, company || 'Labdhi Exim');
+  const text = saudaMessage(deal, company || 'Labdhi Exim', { revised });
   let phone = party ? waPhone(party.phone) : null;
 
   const numberInput = h('input', {
@@ -137,7 +137,7 @@ export async function sendSauda(deal, company, { auto = false, booked = auto } =
   const onKey = e => { if (e.key === 'Escape') close(); };
   const card = h('div', { class: 'modal-card wa-card' },
     h('div', { class: 'modal-head' },
-      h('div', {}, h('div', { class: 'modal-title' }, booked ? `${deal.ref} booked` : `Send ${deal.ref}`), sub),
+      h('div', {}, h('div', { class: 'modal-title' }, revised ? `${deal.ref} revised` : booked ? `${deal.ref} booked` : `Send ${deal.ref}`), sub),
       h('button', { type: 'button', class: 'modal-x', onclick: close }, '×')),
     h('pre', { class: 'wa-msg' }, text),
     numberRow,

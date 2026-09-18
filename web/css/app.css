@@ -800,3 +800,28 @@ body:has(.wa-card) #toasts{top:calc(12px + env(safe-area-inset-top,0px));bottom:
 .export-btn{margin-left:4px;padding:9px 16px;border-radius:10px;background:#107c41;color:#fff;font-weight:680;font-size:14px;white-space:nowrap}
 .export-btn:hover{filter:brightness(1.08)}
 .export-btn:disabled,.mexport:disabled{opacity:.6;cursor:wait}
+
+/* ---- reviewing an edit or a cancel: every change, before it is saved */
+.review-card{width:min(600px,100%)}
+.rv-fields,.rv-effects{display:flex;flex-direction:column;gap:7px}
+.rv-fields:empty{display:none}
+.rv-line{display:flex;align-items:baseline;gap:12px;padding:9px 12px;background:var(--bg);border-radius:10px;font-size:14.5px}
+.rv-line > span:first-child{flex:1;min-width:0;color:var(--ink-2)}
+.rv-ab{font-family:var(--mono);font-size:13.5px;text-align:right}
+.rv-ab s{color:var(--ink-3);text-decoration:line-through}
+.rv-ab b{font-weight:700}
+.rv-ab.up b{color:var(--up)} .rv-ab.down b{color:var(--down)}
+.rv-title{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin-top:6px}
+.rv-sale{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding:10px 12px;border:1px solid var(--line);border-radius:11px}
+.rv-sale-who{flex:1 1 180px;min-width:0}
+.rv-sale-who b{font-family:var(--mono);font-size:13.5px}
+.rv-sale-who span{display:block;font-size:13px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rv-sale-nums{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+.rv-total{background:var(--accent-soft)}
+.rv-note{display:flex;flex-direction:column;gap:4px;padding:12px 14px;border-radius:12px;background:#fff6e0;border:1px solid #f0dca8;
+  font-size:14px;color:#6a4d00}
+.form-save.danger{background:var(--down)}
+@media (max-width: 760px){
+  .rv-line{flex-wrap:wrap}
+  .rv-ab{text-align:left}
+}

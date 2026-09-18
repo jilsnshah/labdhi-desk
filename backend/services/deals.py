@@ -23,6 +23,14 @@ class DealError(Exception):
     """User-facing, expected failure. The API turns this into a 400."""
 
 
+class RehomeNeeded(DealError):
+    """The change is possible only by moving sales already made onto other stock."""
+
+    def __init__(self, message: str, grams: int):
+        super().__init__(message)
+        self.grams = grams
+
+
 # ------------------------------------------------------------------ refs
 def financial_year(deal_date: Optional[str] = None) -> str:
     """Indian financial year, April to March: 10 Sep 2026 -> "26-27"."""
@@ -236,7 +244,10 @@ def reallocate(sale_deal_id: int, pins=None, policy=None) -> Dict[str, Any]:
 
 
 # ------------------------------------------------------------------ cancel
-def cancel_deal(deal_id: int, reason: str = "") -> Dict[str, Any]:
+def cancel_deal(deal_id: int, reason: str = "", rehome: bool = False) -> Dict[str, Any]:
+    """Reverse a sauda. A purchase whose stock is already sold is refused -
+    unless `rehome`, which first moves those sales onto other stock of the same
+    product in the same warehouse (see revise.py), all in this transaction."""
     with db.tx() as conn:
         deal = db.q1("SELECT * FROM deals WHERE id=?", (deal_id,))
         if deal is None:
@@ -250,16 +261,23 @@ def cancel_deal(deal_id: int, reason: str = "") -> Dict[str, Any]:
                    JOIN lots  l ON l.id = a.lot_id
                    JOIN deals d ON d.id = a.sale_deal_id
                    WHERE l.deal_id=? AND a.active=1""", (deal_id,))
-            if sold:
-                raise DealError(
-                    "Cannot cancel %s - its material is already sold on %s. Cancel those first."
-                    % (deal["ref"], ", ".join(sorted(r["ref"] for r in sold))))
             moved = db.scalar(
                 """SELECT COUNT(*) FROM stock_moves m JOIN lots l ON l.id = m.lot_id
                    WHERE l.deal_id=? AND m.status='done'""", (deal_id,))
             if moved:
                 raise DealError("Cannot cancel %s - some of it was transferred or adjusted. "
                                 "Undo those movements first." % deal["ref"])
+            if sold and not rehome:
+                grams = db.scalar("""SELECT COALESCE(SUM(a.qty_g),0) FROM allocations a
+                                     JOIN lots l ON l.id = a.lot_id WHERE l.deal_id=? AND a.active=1""",
+                                  (deal_id,))
+                raise RehomeNeeded(
+                    "Cannot cancel %s - %s of it is already sold on %s. Move those sales onto other "
+                    "stock, or cancel them first."
+                    % (deal["ref"], fmt_qty(grams), ", ".join(sorted(r["ref"] for r in sold))), grams)
+            if sold:
+                from .revise import rehome_purchase
+                rehome_purchase(conn, deal)
             conn.execute("UPDATE lots SET status='cancelled' WHERE deal_id=?", (deal_id,))
 
         if deal["side"] == "sell" and deal["status"] == "booked":
