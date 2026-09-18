@@ -77,6 +77,43 @@ const qs = o => Object.entries(o || {})
 const get = (path, params) => call(path + (params && qs(params) ? '?' + qs(params) : ''));
 const post = (path, body) => call(path, { method: 'POST', body: body || {} });
 
+// A file from the server (the Excel report). On a phone it goes to the share
+// sheet - Save to Files, WhatsApp, Mail - which is where an iPhone expects a
+// file to go; if the browser will not share it, or on a desktop, it downloads.
+const isPhone = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+export async function downloadFile(path, params, fallbackName) {
+  const token = getToken();
+  const res = await fetch(base() + path + (qs(params) ? '?' + qs(params) : ''),
+    { headers: token ? { 'X-Labdhi-Token': token } : {} });
+  if (res.status === 401) {
+    const entered = await askForToken();
+    if (entered) { setToken(entered); return downloadFile(path, params, fallbackName); }
+    throw new Error('Password required');
+  }
+  if (!res.ok) {
+    let msg = `Export failed (${res.status})`;
+    try { msg = (await res.json()).error || msg; } catch (_) { /* not json */ }
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const m = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') || '');
+  const name = m ? m[1] : fallbackName;
+  if (isPhone() && window.File && navigator.canShare) {
+    const file = new File([blob], name, { type: blob.type });
+    if (navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: name }); return 'shared'; }
+      catch (err) { if (err && err.name === 'AbortError') return 'cancelled'; /* else fall back to download */ }
+    }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+  return 'downloaded';
+}
+
 export const api = {
   bootstrap: () => get('/api/bootstrap'),
   summary: () => get('/api/summary'),

@@ -600,3 +600,7 @@ body.phone.trading #toasts { bottom: calc(90px + env(safe-area-inset-bottom, 0px
   .modal-card.wa-card .wa-msg { max-height: 34vh; max-height: 34dvh; }
   .modal-card .modal-head, .modal-card .form-err { flex: none; }
 }
+
+.mflow-top { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.mflow-top b { flex: 1; font-size: 15px; font-weight: 700; }
+.mexport { padding: 9px 13px; border-radius: 11px; background: #107c41; color: #fff; font-weight: 680; font-size: 13.5px; white-space: nowrap; }

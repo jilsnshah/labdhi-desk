@@ -134,6 +134,22 @@ class TestEveryEndpoint(unittest.TestCase):
         self.assertEqual(api.undo()["move"]["status"], "cancelled")
         self.assertEqual(adj["qty_g"], -100_000)
 
+    def test_flow_export_is_a_workbook_that_adds_up(self):
+        import io
+        from openpyxl import load_workbook
+        resp = api.export_flow(date_from="2000-01-01", date_to="2099-12-31")
+        self.assertIn("spreadsheetml", resp.media_type)
+        wb = load_workbook(io.BytesIO(resp.body))
+        self.assertEqual(wb.sheetnames, ["Summary", "Material Flow", "Sales", "Purchases", "Stock Movements"])
+        flow = wb["Material Flow"]
+        rows = [r for r in flow.iter_rows(min_row=5, values_only=True) if r[0] not in (None, "TOTAL")]
+        sold_kg = db.scalar("SELECT COALESCE(SUM(a.qty_g),0) FROM allocations a JOIN deals d ON d.id=a.sale_deal_id "
+                            "WHERE a.active=1 AND d.status='booked'") / 1000
+        self.assertAlmostEqual(sum(r[8] for r in rows), sold_kg)
+        self.assertTrue(all(r[2] and r[14] for r in rows), "every row names its supplier and its buyer")
+        empty = api.export_flow(date_from="1990-01-01", date_to="1990-01-31")
+        self.assertEqual(load_workbook(io.BytesIO(empty.body))["Material Flow"]["A5"].value, "No sales in this period.")
+
     def test_sell_preview(self):
         plan = api.preview_sell(api.PreviewIn(product_id=self.product_id,
                                               warehouse_id=self.wh["Mundra"], qty_g=MT, rate_paise=12000))

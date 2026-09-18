@@ -3,9 +3,9 @@
 // allocation, coloured by the margin it earned. What is still in stock stays
 // as an unconnected stub — you can see idle money.
 
-import { h, mount, svg, costTint, pnlClass, searchBar } from './ui.js';
+import { h, mount, svg, costTint, pnlClass, searchBar, toast } from './ui.js';
 import * as f from './fmt.js';
-import { api } from './api.js';
+import { api, downloadFile } from './api.js';
 
 const W = 1040, LOT_X = 250, LOT_W = 26, SALE_X = 764, GAP = 9, MIN_H = 16;
 
@@ -51,7 +51,8 @@ export async function renderFlow(root, ctx) {
       h('span', { class: 'dim', style: { fontSize: '14px' } },
         graph.truncated
           ? `newest ${graph.sales_shown} of ${graph.sales_total} sales`
-          : `${graph.sales_shown} sale${graph.sales_shown === 1 ? '' : 's'} in range`)),
+          : `${graph.sales_shown} sale${graph.sales_shown === 1 ? '' : 's'} in range`),
+      exportButton(ctx)),
 
     h('div', { class: 'range' },
       h('input', {
@@ -257,4 +258,24 @@ export async function showNode(kind, id) {
           h('i', { class: 'pipe', style: { background: 'var(--down)' } }),
           h('b', {}, f.qty(n.uncovered_g)), h('span', {}, 'uncovered — short position')) : null)));
   }
+}
+
+// The report covers exactly what the screen shows: the same dates and product.
+export function exportButton(ctx, { phone = false, from, to } = {}) {
+  const btn = h('button', {
+    class: phone ? 'mexport' : 'export-btn',
+    onclick: async () => {
+      btn.disabled = true; const label = btn.textContent; btn.textContent = 'Preparing…';
+      try {
+        const how = await downloadFile('/api/export/flow', {
+          date_from: from !== undefined ? from : (ctx.flowFrom || undefined),
+          date_to: to !== undefined ? to : (ctx.flowTo || undefined),
+          product_id: ctx.productFilter || undefined
+        }, 'Labdhi-Flow-of-Material.xlsx');
+        if (how === 'downloaded') toast('Excel report downloaded');
+      } catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
+      finally { btn.disabled = false; btn.textContent = label; }
+    }
+  }, '⬇ Export to Excel');
+  return btn;
 }

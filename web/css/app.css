@@ -795,3 +795,8 @@ main{overflow:auto;padding:26px 24px 60px}
 .mmore.wa{border-color:#25d366;color:#128c4a;font-weight:700}
 /* while the WhatsApp card is up, notices move to the top so they never cover Send */
 body:has(.wa-card) #toasts{top:calc(12px + env(safe-area-inset-top,0px));bottom:auto}
+
+/* ---- export */
+.export-btn{margin-left:4px;padding:9px 16px;border-radius:10px;background:#107c41;color:#fff;font-weight:680;font-size:14px;white-space:nowrap}
+.export-btn:hover{filter:brightness(1.08)}
+.export-btn:disabled,.mexport:disabled{opacity:.6;cursor:wait}

@@ -13,12 +13,12 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import db, security
-from .services import (allocation, dashboard, deals, inventory, parties, products, stock,
+from .services import (allocation, dashboard, deals, inventory, parties, products, report, stock,
                        warehouses)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -344,6 +344,16 @@ def cancel_move(move_id: int):
 def graph(product_id: Optional[int] = None, warehouse_id: Optional[int] = None,
           date_from: Optional[str] = None, date_to: Optional[str] = None, limit: int = 60):
     return inventory.graph(product_id, date_from, date_to, limit, warehouse_id)
+
+
+@app.get("/api/export/flow")
+def export_flow(date_from: Optional[str] = None, date_to: Optional[str] = None,
+                product_id: Optional[int] = None, warehouse_id: Optional[int] = None):
+    """The Flow screen's window as an Excel workbook."""
+    data = report.flow_workbook(date_from, date_to, product_id, warehouse_id)
+    return Response(content=data,
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": 'attachment; filename="%s"' % report.filename(date_from, date_to)})
 
 
 @app.get("/api/trace/{kind}/{entity_id}")

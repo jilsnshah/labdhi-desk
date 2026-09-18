@@ -12,6 +12,7 @@ import { pagedList } from './lists.js';
 import { partyForm, productForm, warehouseForm, transferForm, adjustForm, partySub } from './forms.js';
 import { removeRecord, nameForm } from './setup.js';
 import { MOVE_LABEL } from './stock.js';
+import { exportButton } from './flow.js';
 import { sendSauda } from './whatsapp.js';
 
 let ctx = null;
@@ -580,6 +581,9 @@ export async function renderMobileFlow(root, appCtx) {
 
   mount(root, h('div', { class: 'view' },
     h('div', { class: 'mflow', style: { paddingTop: '14px' } },
+      h('div', { class: 'mflow-top' },
+        h('b', {}, 'Flow of material'),
+        exportButton(ctx, { phone: true, from: from || '', to: '' })),
       h('div', { class: 'mchips g4 filter', style: { padding: '0 0 10px' } },
         ...RANGES.map(([text, days]) => h('button', {
           class: 'mchip' + (ctx.flowDays === days ? ' on' : ''), onclick: () => { ctx.flowDays = days; renderMobileFlow(root, ctx); }
