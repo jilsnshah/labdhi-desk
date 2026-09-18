@@ -268,6 +268,10 @@ def cancel_deal(deal_id: int, reason: str = "") -> Dict[str, Any]:
 
         conn.execute("UPDATE deals SET status='cancelled', cancelled_at=? WHERE id=?",
                      (db.now(), deal_id))
+        # The booking is reversed now, so it is no longer something Undo can
+        # reverse; Undo moves on to whatever was done before it.
+        conn.execute("UPDATE events SET undone=1 WHERE entity='deal' AND entity_id=? "
+                     "AND action='book' AND undone=0", (deal_id,))
         db.log(conn, "deal", deal_id, "cancel", "Cancelled %s" % deal["ref"],
                {"reason": reason, "ref": deal["ref"]})
     return get_deal(deal_id)
@@ -281,21 +285,36 @@ def _margin_of(sale_deal_id: int) -> int:
 
 
 def _rollback_mark(conn, deal) -> None:
-    """A cancelled sale must not keep pricing the book. Fall back to the most
-    recent surviving sale, or drop the mark entirely."""
+    """Put the mark back to what it would be had this sale never been booked.
+
+    The mark is the last price signal: the most recent booked sale, or a rate
+    set by hand, whichever came later. Only a mark this sale set is touched -
+    if a later sale or a manual rate has replaced it since, it stays. Order is
+    by audit-event id, which is strictly increasing, so two things booked in
+    the same second still have a definite order.
+    """
     mark = db.q1("SELECT * FROM marks WHERE product_id=?", (deal["product_id"],))
     if mark is None or mark["source"] != "sale %s" % deal["ref"]:
         return
-    prev = db.q1(
-        "SELECT ref, rate_paise FROM deals WHERE product_id=? AND side='sell' "
-        "AND status='booked' AND id != ? ORDER BY deal_date DESC, id DESC LIMIT 1",
-        (deal["product_id"], deal["id"]),
-    )
-    if prev:
-        conn.execute("UPDATE marks SET rate_paise=?, source=?, updated_at=? WHERE product_id=?",
-                     (prev["rate_paise"], "sale %s" % prev["ref"], db.now(), deal["product_id"]))
+    sale = db.q1(
+        """SELECT d.ref, d.rate_paise, MAX(e.id) AS ev FROM deals d
+           JOIN events e ON e.entity = 'deal' AND e.entity_id = d.id AND e.action = 'book'
+           WHERE d.product_id = ? AND d.side = 'sell' AND d.status = 'booked' AND d.id != ?
+           GROUP BY d.id, d.ref, d.rate_paise ORDER BY ev DESC LIMIT 1""",
+        (deal["product_id"], deal["id"]))
+    manual = db.q1(
+        "SELECT id AS ev, payload FROM events WHERE entity = 'product' AND entity_id = ? "
+        "AND action = 'mark' ORDER BY id DESC LIMIT 1", (deal["product_id"],))
+    if manual and (sale is None or manual["ev"] > sale["ev"]):
+        import json
+        rate, source = int(json.loads(manual["payload"])["rate_paise"]), "manual"
+    elif sale:
+        rate, source = sale["rate_paise"], "sale %s" % sale["ref"]
     else:
         conn.execute("DELETE FROM marks WHERE product_id=?", (deal["product_id"],))
+        return
+    conn.execute("UPDATE marks SET rate_paise=?, source=?, updated_at=? WHERE product_id=?",
+                 (rate, source, db.now(), deal["product_id"]))
 
 
 def _remark_mark(conn, deal) -> None:

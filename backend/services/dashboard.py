@@ -119,14 +119,15 @@ def attention() -> List[Dict[str, Any]]:
 def counterparties(limit: Optional[int] = None, offset: int = 0) -> Dict[str, Any]:
     """Who the desk trades with, most recent first, with the margin each has earned."""
     limit, offset = db.page_args(limit, offset, default=12)
-    total = db.scalar("SELECT COUNT(DISTINCT party_id) FROM deals")
+    # a cancelled deal is not trade: a party whose only deal was cancelled is not a counterparty
+    total = db.scalar("SELECT COUNT(DISTINCT party_id) FROM deals WHERE status='booked'")
     rows = db.q(
         """SELECT * FROM (
              SELECT p.id, p.name,
                     COALESCE(SUM(CASE WHEN d.side='buy'  AND d.status='booked' THEN d.qty_g END),0) AS bought_g,
                     COALESCE(SUM(CASE WHEN d.side='sell' AND d.status='booked' THEN d.qty_g END),0) AS sold_g,
                     COUNT(d.id) AS deals, MAX(d.deal_date) AS last_deal
-             FROM parties p JOIN deals d ON d.party_id=p.id
+             FROM parties p JOIN deals d ON d.party_id=p.id AND d.status='booked'
              GROUP BY p.id, p.name) x
            ORDER BY last_deal DESC, deals DESC LIMIT ? OFFSET ?""", (limit, offset))
     out = []

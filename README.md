@@ -17,6 +17,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m tests.test_parties       # party identity + importer
 .venv/bin/python -m tests.test_migrate       # a v1 book upgrades without losing a row
 .venv/bin/python -m tests.test_api           # every endpoint, every list is a page
+.venv/bin/python -m tests.test_cancel        # cancel/undo puts every figure back exactly
 ```
 
 Every test module also runs against Postgres: `DATABASE_URL=postgres://... python -m tests.<module>`.
