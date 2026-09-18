@@ -106,6 +106,17 @@ class Cancel(unittest.TestCase):
         self.assertEqual(undone["deal"]["id"], p["id"])
         self.assertBookEqual(before, snapshot())
 
+    def test_undo_skips_a_deal_cancelled_before_the_fix(self):
+        # books cancelled by older code left their booking event open; Undo
+        # must step over it to the action before, not stop on "Already cancelled"
+        p = buy("Supplier D", 3 * MT, 9900, "2026-09-05", wh="Aslali")
+        s = sell("Buyer Y", 2 * MT, 10500, "2026-09-06", wh="Mundra")
+        deals.cancel_deal(s["id"])
+        with db.tx() as conn:           # what the old cancel left behind
+            conn.execute("UPDATE events SET undone=0 WHERE entity='deal' AND entity_id=? AND action='book'", (s["id"],))
+        self.assertEqual(deals.last_undoable()["entity_id"], p["id"])
+        self.assertEqual(deals.undo_event(int(deals.last_undoable()["id"]))["deal"]["id"], p["id"])
+
     def test_a_purchase_already_sold_cannot_be_cancelled_and_nothing_changes(self):
         first_buy = db.q1("SELECT id FROM deals WHERE side='buy' ORDER BY id")["id"]
         before = snapshot()

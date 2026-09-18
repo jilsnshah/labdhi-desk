@@ -493,5 +493,18 @@ def undo_event(event_id: int) -> Dict[str, Any]:
 
 
 def last_undoable() -> Optional[Dict[str, Any]]:
+    """The newest action Undo can still reverse.
+
+    A booking whose deal is already cancelled, or a stock move already
+    reversed, is skipped even if its event was never marked undone (books
+    cancelled before cancel_deal started marking them), so Undo always moves
+    on to something it can actually reverse.
+    """
     return db.row_to_dict(db.q1(
-        "SELECT * FROM events WHERE undoable=1 AND undone=0 ORDER BY id DESC LIMIT 1"))
+        """SELECT e.* FROM events e
+           LEFT JOIN deals d       ON e.entity = 'deal' AND d.id = e.entity_id
+           LEFT JOIN stock_moves m ON e.entity = 'move' AND m.id = e.entity_id
+           WHERE e.undoable = 1 AND e.undone = 0
+             AND NOT (e.entity = 'deal' AND COALESCE(d.status, 'cancelled') = 'cancelled')
+             AND NOT (e.entity = 'move' AND COALESCE(m.status, 'cancelled') = 'cancelled')
+           ORDER BY e.id DESC LIMIT 1"""))
