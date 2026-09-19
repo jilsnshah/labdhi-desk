@@ -53,7 +53,6 @@ export function startTrade(side, opts = {}, appCtx = {}) {
     terms: { freight_by: '', delivery_by: '', payment_terms: '', eway: '', remarks: '' },
     busy: false, error: '',
     shortOK: false,                   // sell: also offer products / warehouses with no stock (sell short)
-    termsOpen: false,
     sauda_no: '', saudaAuto: true,
     plus_gst: true, payment_due: '', ex_place: '',
     rateInvalid: false, rateText: '',
@@ -81,7 +80,6 @@ async function prefill(d) {
     terms: { freight_by: d.freight_by || '', delivery_by: d.delivery_by || '', payment_terms: d.payment_terms || '',
              eway: d.eway || '', remarks: d.remarks || '' }
   });
-  state.termsOpen = !!(d.transporter_id || d.freight_by || d.delivery_by || d.payment_terms || d.eway || d.remarks || d.payment_due);
   await chooseProduct(d.product_id, { auto: false });
   if (state !== my) return;
   await chooseWarehouse({ id: d.warehouse_id, name: d.warehouse });
@@ -714,8 +712,9 @@ function blockTerms() {
       onclick: () => { t[key] = t[key] === o ? '' : o; render(); }
     }, o)));
 
-  return h('details', { class: 'more', open: state.termsOpen, ontoggle: e => { state.termsOpen = e.target.open; } },
-    h('summary', {}, 'Transport, payment, e-way  (optional)'),
+  // always open: these are filled on most saudas, so they should never be a click away
+  return h('div', { class: 'more' },
+    label('Transport, payment, e-way', false, 'optional'),
     h('div', { class: 'terms' },
       h('div', { class: 'field' }, h('label', {}, 'Transporter'),
         h('div', { class: 'pick-btn' + (state.transporter ? '' : ' empty'), onclick: chooseTransporter },
