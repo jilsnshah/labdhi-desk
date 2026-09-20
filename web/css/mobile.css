@@ -611,3 +611,4 @@ body.phone.trading #toasts { bottom: calc(90px + env(safe-area-inset-bottom, 0px
 }
 .mt-hint.neg, .mflow-empty.neg { color: var(--down); font-weight: 600; }
 .mdeal-meta span.neg { color: var(--down); font-weight: 650; }
+.mflow-card .mark-btn { margin-top: 10px; font-size: 13px; padding: 10px; }

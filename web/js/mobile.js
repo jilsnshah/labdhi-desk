@@ -9,7 +9,7 @@ import { h, mount, svg, toast, debounce } from './ui.js';
 import * as f from './fmt.js';
 import { api } from './api.js';
 import { pagedList } from './lists.js';
-import { partyForm, productForm, warehouseForm, transferForm, adjustForm, partySub } from './forms.js';
+import { partyForm, productForm, warehouseForm, markForm, transferForm, adjustForm, partySub } from './forms.js';
 import { removeRecord, nameForm } from './setup.js';
 import { MOVE_LABEL } from './stock.js';
 import { flowExportButton } from './flow.js';
@@ -413,7 +413,10 @@ const MSETUP = {
     load: p => api.products(p),
     card: (p, again) => card(async () => { if (await productForm(await api.product(p.id))) again(); },
       p.display, p.packing || (p.deal_count ? `${p.deal_count} deals` : 'never traded'),
-      h('b', { class: 'num' }, p.stock_g ? f.qty(p.stock_g) : '—'), null,
+      h('b', { class: 'num' }, p.stock_g ? f.qty(p.stock_g) : '—'),
+      h('button', { class: 'mmore mark-btn', onclick: async e => { e.stopPropagation(); if (await markForm(p)) again(); } },
+        p.mark_paise ? `Market rate ${f.rate(p.mark_paise)}/kg · ${p.mark_source === 'manual' ? 'set by you' : 'last sale'}`
+                     : 'Set market rate'),
       x(p.display, () => api.productRemove(p.id), again))
   },
   warehouses: {

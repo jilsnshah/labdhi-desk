@@ -246,6 +246,8 @@ def list_products(q: str = "", material_id: Optional[int] = None, grade_id: Opti
     rows = db.q(
         """SELECT * FROM (
              SELECT s.*, {stock} AS stock_g,
+                    (SELECT m.rate_paise FROM marks m WHERE m.product_id = s.id) AS mark_paise,
+                    (SELECT m.source FROM marks m WHERE m.product_id = s.id) AS mark_source,
                     (SELECT COUNT(*) FROM deals d WHERE d.product_id = s.id
                      AND d.status != 'cancelled') AS deal_count,
                     (SELECT MAX(d.deal_date) FROM deals d WHERE d.product_id = s.id

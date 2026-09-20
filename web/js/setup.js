@@ -4,7 +4,7 @@ import { h, mount, toast, searchBar } from './ui.js';
 import * as f from './fmt.js';
 import { api } from './api.js';
 import { pagedList, counter } from './lists.js';
-import { openForm, partyForm, productForm, warehouseForm } from './forms.js';
+import { openForm, partyForm, productForm, warehouseForm, markForm } from './forms.js';
 
 export const TABS = [
   ['parties', 'Parties'], ['products', 'Products'], ['warehouses', 'Warehouses'],
@@ -87,15 +87,19 @@ const SECTIONS = {
       title: 'Products', addLabel: '+ Add product', onAdd: () => productForm(),
       hint: 'A product is a material, a grade and the manufacturer who made it. Stock is kept per product, per warehouse.',
       placeholder: 'Search material, grade or manufacturer…',
-      head: ['Product', 'Material', 'Grade', 'Manufacturer', 'Packing', { label: 'In stock (MT)', cls: 'r' }, { label: 'Deals', cls: 'r' }, ''],
+      head: ['Product', 'Material', 'Grade', 'Manufacturer', 'Packing', { label: 'In stock (MT)', cls: 'r' },
+             { label: 'Market rate (₹/kg)', cls: 'r' }, { label: 'Deals', cls: 'r' }, ''],
       load: p => api.products(p),
       row: (p, again) => h('tr', {},
         h('td', { class: 'strong' }, p.display),
         h('td', {}, p.material), h('td', {}, p.grade), h('td', {}, p.manufacturer),
         h('td', {}, p.packing || ''),
         h('td', { class: 'r mono' }, p.stock_g ? f.mt(p.stock_g) : ''),
+        h('td', { class: 'r mono' }, p.mark_paise ? f.perKg(p.mark_paise) : h('span', { class: 'dim' }, 'not set'),
+          p.mark_paise ? h('small', { class: 'dim' }, p.mark_source === 'manual' ? 'set by you' : 'last sale') : null),
         h('td', { class: 'r mono' }, p.deal_count || ''),
-        acts(act('Edit', async () => { if (await productForm(await api.product(p.id))) again(); }),
+        acts(act('Market rate', async () => { if (await markForm(p)) again(); }),
+             act('Edit', async () => { if (await productForm(await api.product(p.id))) again(); }),
              act('×', () => removeRecord(p.display, () => api.productRemove(p.id), again), 'x'))),
       filters: set => {
         const sel = h('select', { class: 'setup-select', onchange: e => set(e.target.value ? { material_id: e.target.value } : {}) },

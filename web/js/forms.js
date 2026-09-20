@@ -324,6 +324,32 @@ export async function warehouseForm(existing = null, prefill = {}) {
   return saved;
 }
 
+// The market rate a product is valued at: the last sale sets it by itself, and
+// this is where the trader overrides it with today's rate.
+export async function markForm(product) {
+  const now = product.mark_paise;
+  const saved = await openForm({
+    title: `Market rate · ${product.display}`,
+    sub: now ? `Now ${f.rate(now)}/kg, from ${product.mark_source === 'manual' ? 'a rate you set' : product.mark_source}`
+             : 'No rate yet — open P&L counts this product as zero until one is set',
+    submitLabel: 'Set rate',
+    fields: [
+      { key: 'rate', label: 'Market rate (₹ per kg)', value: now ? f.perKgPlain(now) : '', required: true,
+        inputmode: 'decimal', autofocus: true,
+        hint: 'What it would sell for today. Used for open P&L; it never changes a booked sauda.' }
+    ],
+    submit: async v => {
+      const paise = f.fromPerKg(String(v.rate).replace(/[^0-9.]/g, ''));
+      if (paise === null) throw new Error('Rates go to at most 2 decimals — e.g. ₹98.25');
+      if (!paise) throw new Error('Type the rate in ₹ per kg');
+      await api.setMark(product.id, paise);
+      return { rate_paise: paise };
+    }
+  });
+  if (saved) toast(`${product.display} marked at ${f.rate(saved.rate_paise)}/kg`);
+  return saved;
+}
+
 export async function productForm(existing = null, prefill = {}) {
   const p = existing || {};
   const fixed = !!(existing && existing.deal_count);
