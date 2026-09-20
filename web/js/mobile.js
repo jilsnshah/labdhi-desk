@@ -24,7 +24,7 @@ export function mountShell(appCtx) {
   ctx = appCtx;
   const head = h('header', { class: 'mhead' },
     h('div', { class: 'mhead-top' },
-      h('i', { class: 'mhead-dot' }),
+      h('img', { class: 'mhead-logo', src: '/img/labdhi-mark.png', alt: '' }),
       h('div', { class: 'mhead-name', id: 'm-company' }, 'Labdhi Desk'),
       h('div', { class: 'mhead-stat' }, h('b', { id: 'm-pnl', class: 'num' }, '—'), h('span', {}, 'open p&l'))),
     h('div', { class: 'mhead-strip', id: 'm-strip' }));

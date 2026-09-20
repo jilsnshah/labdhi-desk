@@ -33,6 +33,7 @@ body.phone.trading { --dock-h: 0px; }
               min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mhead-stat { flex: 0 0 auto; }
 .mhead-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--up); flex: 0 0 8px; }
+.mhead-logo { width: 18px; height: 18px; flex: 0 0 18px; display: block; object-fit: contain; }
 .mhead-stat { margin-left: auto; text-align: right; white-space: nowrap; }
 .mhead-stat b { display: block; font-size: 15px; font-weight: 700; line-height: 1.15; }
 .mhead-stat span { font-size: 9px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
