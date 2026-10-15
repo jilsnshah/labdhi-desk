@@ -50,7 +50,8 @@ export function startTrade(side, opts = {}, appCtx = {}) {
     lots: [], alloc: {}, allocText: {},
     qty_g: 0, rate_paise: 0,
     transporter: null,
-    labour_paise: 0, freight_paise: 0,      // hamali and lorry, always ours
+    labour_paise: 0, freight_paise: 0,      // hamali and lorry, always ours: the whole-deal amounts
+    labour_rate: 0, freight_rate: 0,        // as quoted: labour per MT, freight per kg
     terms: { freight_by: '', delivery_by: '', payment_terms: '', eway: '', remarks: '' },
     busy: false, error: '',
     shortOK: false,                   // sell: also offer products / warehouses with no stock (sell short)
@@ -78,6 +79,8 @@ async function prefill(d) {
     sauda_no: d.ref, saudaAuto: false,
     payment_due: d.payment_due || '', ex_place: d.ex_place || '',
     labour_paise: d.labour_paise || 0, freight_paise: d.freight_paise || 0,
+    labour_rate: Math.round(COSTS.labour.of(d.labour_paise || 0, d.qty_g)),
+    freight_rate: Math.round(COSTS.freight.of(d.freight_paise || 0, d.qty_g)),
     transporter: d.transporter_id ? { id: d.transporter_id, name: d.transporter_name } : null,
     terms: { freight_by: d.freight_by || '', delivery_by: d.delivery_by || '', payment_terms: d.payment_terms || '',
              eway: d.eway || '', remarks: d.remarks || '' }
@@ -515,6 +518,7 @@ function shortText() {
 function setQty(g) {
   const before = state.qty_g, wasShort = shortG() > 0;
   state.qty_g = Math.max(0, g || 0);
+  recostTotals();                       // a rate per MT or per kg is worth more on more material
   if (shortG() > 0) takeEverything();
   else if (wasShort) resetAlloc();
   if ((before > 0) !== (state.qty_g > 0) || wasShort !== shortG() > 0) render(); else sync();
@@ -592,33 +596,48 @@ function setRate(paise, typing = false) {
 // ---- what the sauda costs us to handle and move. Always ours, both sides.
 const costsPaise = () => (state.labour_paise || 0) + (state.freight_paise || 0);
 
+// Labour is quoted per tonne, freight per kilo - the way they are agreed. What
+// the book keeps is the whole-deal amount, so the rate is multiplied out here
+// and again whenever the quantity moves.
+const COSTS = {
+  labour: { field: 'labour_paise', rate: 'labour_rate', name: 'Labour', unit: '/MT',
+            total: (rate, qty) => rnd(rate * qty / MT), of: (paise, qty) => (qty ? paise * MT / qty : 0) },
+  freight: { field: 'freight_paise', rate: 'freight_rate', name: 'Freight', unit: '/kg',
+             total: (rate, qty) => valuePaise(qty, rate), of: (paise, qty) => (qty ? paise * 1000 / qty : 0) }
+};
+
+function recostTotals() {
+  for (const c of Object.values(COSTS)) {
+    if (state[c.rate]) state[c.field] = c.total(state[c.rate], state.qty_g);
+  }
+}
+
 function blockCosts() {
-  const perKg = amount => (state.qty_g ? ` · ${f.rate(Math.round(amount * 1000 / state.qty_g))}/kg` : '');
-  const box = (key, name) => h('label', { class: 'cost-field' },
-    h('span', {}, name),
+  const box = c => h('label', { class: 'cost-field' },
+    h('span', {}, `${c.name} ₹${c.unit}`),
     h('div', { class: 'cost-input' }, h('i', {}, '₹'),
       h('input', {
-        class: 'ghost-input num', data: { fkey: key }, placeholder: '0', inputmode: 'decimal',
-        value: state[key] ? String(state[key] / 100) : '',
+        class: 'ghost-input num', data: { fkey: c.rate }, placeholder: '0', inputmode: 'decimal',
+        value: state[c.rate] ? String(state[c.rate] / 100) : '',
         oninput: e => {
           const rupees = parseFloat(String(e.target.value).replace(/[^0-9.]/g, ''));
-          state[key] = isNaN(rupees) ? 0 : Math.round(rupees * 100);
+          state[c.rate] = isNaN(rupees) ? 0 : Math.round(rupees * 100);
+          state[c.field] = c.total(state[c.rate], state.qty_g);
           paintCosts(); sync();
         }
-      })),
-    ui[key + 'Hint'] = h('small', {}, state[key] ? perKg(state[key]) : ''));
+      }), h('em', {}, c.unit)),
+    ui[c.rate + 'Hint'] = h('small', {}, ''));
 
   return h('div', { class: 'block' + (state.qty_g ? '' : ' pending') },
     label('Labour & freight  (yours)', costsPaise() > 0, 'comes off this sauda\'s profit'),
-    h('div', { class: 'costs' }, box('labour_paise', 'Labour'), box('freight_paise', 'Freight'),
+    h('div', { class: 'costs' }, box(COSTS.labour), box(COSTS.freight),
       ui.costsTotal = h('div', { class: 'cost-total' }, '')));
 }
 
 function paintCosts() {
-  for (const key of ['labour_paise', 'freight_paise']) {
-    if (ui[key + 'Hint']) {
-      ui[key + 'Hint'].textContent = state[key] && state.qty_g
-        ? `${f.rate(Math.round(state[key] * 1000 / state.qty_g))}/kg` : '';
+  for (const c of Object.values(COSTS)) {
+    if (ui[c.rate + 'Hint']) {
+      ui[c.rate + 'Hint'].textContent = state[c.field] ? `= ${f.inr(state[c.field])} on ${f.qty(state.qty_g)}` : '';
     }
   }
   if (ui.costsTotal) {

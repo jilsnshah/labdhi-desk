@@ -41,7 +41,8 @@ export function startTicket(side, opts = {}, appCtx) {
     editingLot: null,
     shortOK: false,                   // sell: also offer products / warehouses with no stock (sell short)
     transporter: null,
-    labour_paise: 0, freight_paise: 0,      // hamali and lorry, always ours
+    labour_paise: 0, freight_paise: 0,      // hamali and lorry, always ours: the whole-deal amounts
+    labour_rate: 0, freight_rate: 0,        // as quoted: labour per MT, freight per kg
     terms: { freight_by: '', delivery_by: '', payment_terms: '', eway: '', remarks: '' },
     sauda_no: '', saudaAuto: true,
     plus_gst: true, payment_due: '', ex_place: '',
@@ -70,6 +71,8 @@ async function prefill(d) {
     sauda_no: d.ref, saudaAuto: false,
     payment_due: d.payment_due || '', ex_place: d.ex_place || '',
     labour_paise: d.labour_paise || 0, freight_paise: d.freight_paise || 0,
+    labour_rate: d.qty_g ? Math.round((d.labour_paise || 0) * MT / d.qty_g) : 0,
+    freight_rate: d.qty_g ? Math.round((d.freight_paise || 0) * 1000 / d.qty_g) : 0,
     transporter: d.transporter_id ? { id: d.transporter_id, name: d.transporter_name } : null,
     terms: { freight_by: d.freight_by || '', delivery_by: d.delivery_by || '', payment_terms: d.payment_terms || '',
              eway: d.eway || '', remarks: d.remarks || '' }
@@ -472,7 +475,7 @@ function stepQty() {
         : (live ? `${Math.round(live / 1000).toLocaleString('en-IN')} kg` : 'tap a shortcut or type'))),
     h('div', { class: 'mchips g4' }, ...quick.map(([label, g]) => h('button', {
       class: 'mchip' + (ms.qty_g === g && ms.entry === '' ? ' on' : ''),
-      onclick: () => { ms.qty_g = g; ms.entry = ''; autoIfSingle(); next(); }
+      onclick: () => { ms.qty_g = g; ms.entry = ''; recostTotals(); autoIfSingle(); next(); }
     }, label))),
     numpad()
   ];
@@ -661,13 +664,23 @@ function splitSummary() {
 }
 
 // Labour and freight are ours on both sides and come straight off this sauda.
+// Labour is quoted per tonne and freight per kilo; the book keeps the amount
+// for the whole sauda, so the rates are multiplied out as the quantity moves.
 const costsPaise = () => (ms.labour_paise || 0) + (ms.freight_paise || 0);
+const labourTotal = rate => rnd(rate * ms.qty_g / MT);
+const freightTotal = rate => valuePaise(ms.qty_g, rate);
+
+function recostTotals() {
+  if (ms.labour_rate) ms.labour_paise = labourTotal(ms.labour_rate);
+  if (ms.freight_rate) ms.freight_paise = freightTotal(ms.freight_rate);
+}
 
 function costsText() {
   if (!costsPaise()) return 'None';
-  if (!ms.freight_paise) return `${f.inr(ms.labour_paise)} labour`;
-  if (!ms.labour_paise) return `${f.inr(ms.freight_paise)} freight`;
-  return `${f.inr(costsPaise())} · ${f.inr(ms.labour_paise)} + ${f.inr(ms.freight_paise)}`;
+  const bits = [];
+  if (ms.labour_paise) bits.push(`${f.rate(ms.labour_rate)}/MT`);
+  if (ms.freight_paise) bits.push(`${f.rate(ms.freight_rate)}/kg`);
+  return `${f.inr(costsPaise())} · ${bits.join(' + ')}`;
 }
 
 function openCosts() {
@@ -676,19 +689,22 @@ function openCosts() {
     const n = parseFloat(String(v || '').replace(/[^0-9.]/g, ''));
     return isNaN(n) ? 0 : Math.round(n * 100);
   };
-  const perKg = paid => (ms.qty_g && paid ? `${f.rate(Math.round(paid * 1000 / ms.qty_g))}/kg` : ' ');
+  const total = (key, rate) => (rate ? `= ${f.inr(key === 'labour' ? labourTotal(rate) : freightTotal(rate))}`
+                                     + ` on ${f.qty(ms.qty_g)}` : ' ');
   openForm({
     title: 'Labour & freight', sub: 'Yours on this sauda — taken off its profit', submitLabel: 'Done',
     fields: [
-      { key: 'labour', label: 'Labour (₹ total)', value: rupees(ms.labour_paise), inputmode: 'decimal',
-        half: true, hint: perKg(ms.labour_paise) },
-      { key: 'freight', label: 'Freight (₹ total)', value: rupees(ms.freight_paise), inputmode: 'decimal',
-        half: true, hint: perKg(ms.freight_paise) }
+      { key: 'labour', label: 'Labour (₹ per MT)', value: rupees(ms.labour_rate), inputmode: 'decimal',
+        half: true, hint: total('labour', ms.labour_rate) },
+      { key: 'freight', label: 'Freight (₹ per kg)', value: rupees(ms.freight_rate), inputmode: 'decimal',
+        half: true, hint: total('freight', ms.freight_rate) }
     ],
-    onChange: (key, value, form) => form.hint(key, perKg(paise(value))),
+    onChange: (key, value, form) => form.hint(key, total(key, paise(value))),
     submit: v => {
-      ms.labour_paise = paise(v.labour);
-      ms.freight_paise = paise(v.freight);
+      ms.labour_rate = paise(v.labour);
+      ms.freight_rate = paise(v.freight);
+      ms.labour_paise = labourTotal(ms.labour_rate);
+      ms.freight_paise = freightTotal(ms.freight_rate);
       paint();
       return true;
     }
@@ -818,6 +834,7 @@ function foot(step) {
       if (step === 'qty') {
         const wasShort = shortHere() > 0;
         ms.qty_g = value;
+        recostTotals();                 // a rate per MT or per kg is worth more on more material
         if (wasShort && !shortHere()) ms.alloc = {};    // every lot was full; the split starts again
         autoIfSingle();
       } else ms.rate_paise = value;

@@ -136,8 +136,10 @@ export function dealDetail(deal, ctx, reload) {
       fact('Note', deal.remarks),
       sell ? fact('Margin on material', f.inr(deal.margin_paise, { sign: true }) + (deal.short_g ? ` on ${f.qty(deal.qty_g - deal.short_g)} covered` : ''))
            : fact('Sold so far', f.qty(deal.sold_g)),
-      fact('Labour', deal.labour_paise ? f.inr(deal.labour_paise) : null),
-      fact('Freight', deal.freight_paise ? f.inr(deal.freight_paise) : null),
+      fact('Labour', deal.labour_paise
+        ? `${f.inr(deal.labour_paise)} · ${f.rate(Math.round(deal.labour_paise * 1e6 / deal.qty_g))}/MT` : null),
+      fact('Freight', deal.freight_paise
+        ? `${f.inr(deal.freight_paise)} · ${f.rate(Math.round(deal.freight_paise * 1000 / deal.qty_g))}/kg` : null),
       deal.costs_paise
         ? fact(sell ? 'Margin after costs' : 'Costs on this purchase', f.inr(deal.net_margin_paise, { sign: true }))
         : null,
