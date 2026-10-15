@@ -841,3 +841,15 @@ body:has(.wa-card) #toasts{top:calc(12px + env(safe-area-inset-top,0px));bottom:
 .short-tag{display:inline-block;padding:2px 8px;border-radius:999px;background:#fdecea;color:#9b1c14;font-size:12px;font-weight:700}
 .ladder.short-bar{display:flex;align-items:center;justify-content:center;background:repeating-linear-gradient(135deg,#fdecea 0 8px,#f9dcd8 8px 16px);
   color:#9b1c14;font-size:12.5px;font-weight:700;border-radius:8px}
+
+/* ---- labour and freight: two amounts, always ours */
+.costs{display:flex;flex-wrap:wrap;align-items:flex-end;gap:14px 22px}
+.cost-field{display:flex;flex-direction:column;gap:6px;min-width:150px}
+.cost-field > span{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.cost-input{display:flex;align-items:center;gap:8px;background:var(--bg);border:1px solid var(--line);
+  border-radius:11px;padding:10px 13px}
+.cost-input i{font-style:normal;color:var(--ink-3);font-size:15px}
+.cost-input input{width:100%;background:none;border:none;outline:none;font-size:17px;font-family:var(--mono)}
+.cost-field small{font-size:12.5px;color:var(--ink-3);font-family:var(--mono);min-height:16px}
+.cost-total{font-size:14px;font-weight:650;color:var(--down);margin-left:auto}
+.cost-total:empty{display:none}

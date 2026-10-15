@@ -23,9 +23,13 @@ class TestEveryEndpoint(unittest.TestCase):
     def setUpClass(cls):
         db.reset()
         seed_run()
-        cls.product_id = db.q1("SELECT product_id FROM deals WHERE side='sell' LIMIT 1")["product_id"]
-        cls.sale_id = db.q1("SELECT id FROM deals WHERE side='sell' LIMIT 1")["id"]
         cls.wh = {r["name"]: r["id"] for r in db.q("SELECT id, name FROM warehouses")}
+        # a sale that ships from Mundra, picked in a fixed order: "the first row"
+        # of an unordered query is whatever the database feels like returning,
+        # and SQLite and Postgres do not feel the same way.
+        sale = db.q1("SELECT id, product_id FROM deals WHERE side='sell' AND warehouse_id=? "
+                     "ORDER BY id LIMIT 1", (cls.wh["Mundra"],))
+        cls.product_id, cls.sale_id = sale["product_id"], sale["id"]
 
     def page(self, result, what):
         self.assertEqual(set(result) & PAGE_KEYS, PAGE_KEYS, "%s is not a page" % what)

@@ -21,6 +21,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m tests.test_edit          # an edited deal equals one booked that way from the start
 .venv/bin/python -m tests.test_shorts        # sell short then buy equals buy then sell, every way round
 .venv/bin/python -m tests.test_short_chains  # long trade chains with shorts, every figure worked by hand
+.venv/bin/python -m tests.test_costs         # labour and freight come off the profit, nothing else
 ```
 
 Every test module also runs against Postgres: `DATABASE_URL=postgres://... python -m tests.<module>`.
@@ -74,7 +75,15 @@ of the same product in the same warehouse (shown before and after, sale by
 sale); what other stock cannot cover goes back to being sold short. If some of
 it was moved, it is refused and the error names what blocks it.
 
-**7. Deals can be edited.** Edit on a booked deal opens its ticket filled in.
+**7. Labour and freight are ours.** Every sauda carries two amounts the
+trader types in rupees - labour and freight - and both come straight off what
+it earns, on either side. They are counted on the sauda's own date, so a
+purchase's costs reduce profit the day it is bought; stock stays valued at the
+rate it was bought at, and no lot, allocation or margin moves because of them.
+
+    profit = margin of every sale  -  labour and freight of every sauda
+
+**8. Deals can be edited.** Edit on a booked deal opens its ticket filled in.
 Nothing is saved until the review shows every change and every sale whose
 margin moves. The Sauda No. stays; WhatsApp gets a revised confirmation.
 
@@ -218,6 +227,7 @@ backend/
     deals.py          lifecycle: draft → booked → cancelled
     revise.py         editing a booked deal; moving sales onto other stock
     shorts.py         selling short: open shorts, and covering them as stock arrives
+    charges.py        labour and freight: ours on both sides, off the profit
     inventory.py      positions, lineage graph
     dashboard.py      summary, attention, counterparties
 web/js/

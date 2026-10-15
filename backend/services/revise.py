@@ -45,13 +45,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from .. import db
 from ..money import fmt_qty
 from . import allocation, parties, products, stock, warehouses
-from . import shorts
+from . import charges, shorts
 from .deals import (DealError, RehomeNeeded, ShortNeeded, _release_allocations, _require,
                     _write_allocations, get_deal)
 
 
 PAPER = ("plus_gst", "deal_date", "payment_due", "ex_place", "transporter_id",
-         "freight_by", "delivery_by", "payment_terms", "eway", "remarks")
+         "freight_by", "delivery_by", "payment_terms", "eway", "remarks",
+         "labour_paise", "freight_paise")      # ours on both sides; they move profit, not stock
 CORE = ("party_id", "product_id", "warehouse_id", "qty_g", "rate_paise")
 FIELDS = CORE + PAPER
 TEXT = ("payment_due", "ex_place", "freight_by", "delivery_by", "payment_terms", "eway", "remarks")
@@ -77,13 +78,14 @@ def dry_run(fn):
 def _book_state() -> Dict[str, Any]:
     sales = {r["id"]: dict(r) for r in db.q(
         """SELECT d.id, d.ref, p.name AS party, d.qty_g, d.uncovered_g,
+                  d.labour_paise + d.freight_paise AS costs_paise,
                   COALESCE(SUM(a.qty_g * (a.sale_rate_paise - a.cost_paise)), 0) AS margin_gp,
                   COALESCE(SUM(a.qty_g * a.cost_paise), 0) AS cost_gp,
                   COALESCE(SUM(a.qty_g), 0) AS alloc_g
            FROM deals d JOIN parties p ON p.id = d.party_id
            LEFT JOIN allocations a ON a.sale_deal_id = d.id AND a.active = 1
            WHERE d.side = 'sell' AND d.status = 'booked'
-           GROUP BY d.id, d.ref, p.name, d.qty_g, d.uncovered_g""")}
+           GROUP BY d.id, d.ref, p.name, d.qty_g, d.uncovered_g, d.labour_paise, d.freight_paise""")}
     # stock as the screens show it: free stock less what is sold short there
     cells: Dict[Any, int] = {}
     for r in db.q("""SELECT s.display AS product, w.name AS warehouse, SUM(%s) AS g
@@ -98,7 +100,7 @@ def _book_state() -> Dict[str, Any]:
     realised = db.scalar("""SELECT COALESCE(SUM(a.qty_g * (a.sale_rate_paise - a.cost_paise)), 0)
                             FROM allocations a JOIN deals d ON d.id = a.sale_deal_id
                             WHERE a.active = 1 AND d.status = 'booked'""")
-    return {"sales": sales, "cells": cells, "realised_gp": realised}
+    return {"sales": sales, "cells": cells, "realised_gp": realised, "costs": charges.total()}
 
 
 def _gp(gp) -> int:
@@ -117,8 +119,8 @@ def _effects(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
     sales = []
     for sid in sorted(set(before["sales"]) | set(after["sales"])):
         b, a = before["sales"].get(sid), after["sales"].get(sid)
-        bm = _gp(b["margin_gp"]) if b else None
-        am = _gp(a["margin_gp"]) if a else None
+        bm = (_gp(b["margin_gp"]) - b["costs_paise"]) if b else None
+        am = (_gp(a["margin_gp"]) - a["costs_paise"]) if a else None
         bs = b["uncovered_g"] if b else 0
         as_ = a["uncovered_g"] if a else 0
         if bm != am or bs != as_:
@@ -135,7 +137,8 @@ def _effects(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
         if b != a:
             cells.append({"product": key[0], "warehouse": key[1], "before_g": b, "after_g": a})
     return {"sales": sales, "stock": cells,
-            "realised_before_paise": _gp(before["realised_gp"]), "realised_after_paise": _gp(after["realised_gp"])}
+            "realised_before_paise": _gp(before["realised_gp"]) - before["costs"],
+            "realised_after_paise": _gp(after["realised_gp"]) - after["costs"]}
 
 
 # ------------------------------------------------------------------ marks
@@ -262,6 +265,10 @@ def _clean(deal: Dict[str, Any], changes: Dict[str, Any]) -> Dict[str, Any]:
             v = int(v or 0)
             if v <= 0:
                 raise DealError("%s must be greater than zero" % ("Quantity" if k == "qty_g" else "Rate"))
+        elif k in ("labour_paise", "freight_paise"):
+            v = int(v or 0)
+            if v < 0:
+                raise DealError("Labour and freight cannot be negative")
         elif k == "party_id":
             v = _require(parties.require, v, "supplier" if side == "buy" else "buyer")["id"]
         elif k == "product_id":
@@ -449,6 +456,20 @@ def edit_deal(deal_id: int, changes: Dict[str, Any], rehome: bool = False,
 
 
 # ------------------------------------------------------------------ previews
+def _rupees(paise: int) -> str:
+    """₹25,000 - whole rupees, grouped the Indian way."""
+    whole, rest = divmod(int(paise or 0), 100)
+    text, head = "", str(whole)
+    if len(head) > 3:
+        text, head = head[-3:], head[:-3]
+        while len(head) > 2:
+            text, head = head[-2:] + "," + text, head[:-2]
+        text = head + "," + text
+    else:
+        text = head
+    return "₹" + text + (".%02d" % rest if rest else "")
+
+
 def _labels(old: Dict[str, Any], new: Dict[str, Any], changed: List[str]) -> List[Dict[str, Any]]:
     def show(k, v):
         if v is None:
@@ -463,6 +484,8 @@ def _labels(old: Dict[str, Any], new: Dict[str, Any], changed: List[str]) -> Lis
             return fmt_qty(v)
         if k == "rate_paise":
             return "₹%.2f/kg" % (v / 100)
+        if k in ("labour_paise", "freight_paise"):
+            return _rupees(v)
         if k == "plus_gst":
             return "GST extra" if v else "GST included"
         return str(v)
@@ -470,7 +493,7 @@ def _labels(old: Dict[str, Any], new: Dict[str, Any], changed: List[str]) -> Lis
              "rate_paise": "Rate", "plus_gst": "GST", "deal_date": "Date", "payment_due": "Payment due",
              "ex_place": "Ex-Place", "transporter_id": "Transporter", "freight_by": "Freight paid by",
              "delivery_by": "Transport arranged by", "payment_terms": "Payment terms", "eway": "E-way bill",
-             "remarks": "Note"}
+             "remarks": "Note", "labour_paise": "Labour", "freight_paise": "Freight"}
     return [{"field": k, "label": names[k], "before": show(k, old[k]), "after": show(k, new[k])} for k in changed]
 
 

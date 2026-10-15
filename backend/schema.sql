@@ -116,6 +116,8 @@ CREATE TABLE IF NOT EXISTS deals (
   remarks        TEXT,
   alloc_policy   TEXT,
   uncovered_g    INTEGER NOT NULL DEFAULT 0,
+  labour_paise   INTEGER NOT NULL DEFAULT 0,    -- hamali etc, always ours, whole deal
+  freight_paise  INTEGER NOT NULL DEFAULT 0,    -- transport, always ours, whole deal
   created_at     TEXT NOT NULL,
   booked_at      TEXT,
   cancelled_at   TEXT

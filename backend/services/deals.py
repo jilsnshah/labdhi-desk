@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from .. import db
 from ..money import fmt_money, fmt_qty, value_paise, weighted_rate
-from . import allocation, parties, products, shorts, stock, warehouses
+from . import allocation, charges, parties, products, shorts, stock, warehouses
 
 
 class DealError(Exception):
@@ -83,6 +83,10 @@ def create_deal(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     qty_g = int(payload.get("qty_g") or 0)
     rate_paise = int(payload.get("rate_paise") or 0)
+    labour_paise = int(payload.get("labour_paise") or 0)
+    freight_paise = int(payload.get("freight_paise") or 0)
+    if labour_paise < 0 or freight_paise < 0:
+        raise DealError("Labour and freight cannot be negative")
     if qty_g <= 0:
         raise DealError("Quantity must be greater than zero")
     if rate_paise <= 0:
@@ -113,15 +117,17 @@ def create_deal(payload: Dict[str, Any]) -> Dict[str, Any]:
             """INSERT INTO deals
                (ref,side,status,party_id,product_id,warehouse_id,qty_g,rate_paise,plus_gst,
                 deal_date,payment_due,ex_place,transporter_id,freight_by,delivery_by,
-                payment_terms,eway,remarks,alloc_policy,uncovered_g,created_at)
-               VALUES (?,?,'draft',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)""",
+                payment_terms,eway,remarks,alloc_policy,uncovered_g,
+                labour_paise,freight_paise,created_at)
+               VALUES (?,?,'draft',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)""",
             (ref, side, party["id"], product["id"], wh["id"], qty_g, rate_paise,
              1 if payload.get("plus_gst", True) else 0, deal_date,
              (payload.get("payment_due") or "").strip() or None,
              (payload.get("ex_place") or "").strip() or None,
              transporter_id, payload.get("freight_by"), payload.get("delivery_by"),
              payload.get("payment_terms"), payload.get("eway"), payload.get("remarks"),
-             payload.get("policy") or db.settings().get("alloc_policy", "fifo"), db.now()),
+             payload.get("policy") or db.settings().get("alloc_policy", "fifo"),
+             labour_paise, freight_paise, db.now()),
         )
         db.log(conn, "deal", deal_id, "create", "Drafted %s" % ref, {"side": side, "ref": ref})
 
@@ -397,7 +403,11 @@ def _dress(row) -> Dict[str, Any]:
     q, r = divmod(abs(gp), 1000)
     d["margin_paise"] = (q + (1 if r * 2 >= 1000 else 0)) * (-1 if gp < 0 else 1)
     d["value_paise"] = value_paise(d["qty_g"], d["rate_paise"])
-    d["margin_rate_paise"] = (d["margin_paise"] * 1000 // d["qty_g"]) if d["side"] == "sell" and d["qty_g"] else 0
+    # labour and freight are ours on both sides, so they come off what the sauda earns
+    d["costs_paise"] = charges.of(d)
+    d["net_margin_paise"] = d["margin_paise"] - d["costs_paise"]
+    d["margin_rate_paise"] = ((d["net_margin_paise"] * 1000 // d["qty_g"])
+                              if d["side"] == "sell" and d["qty_g"] else 0)
     return d
 
 
@@ -410,7 +420,8 @@ def get_deal(deal_id: int) -> Optional[Dict[str, Any]]:
         deal["allocations"] = allocations_of(deal_id)
         deal["margin_paise"] = sum(a["margin_paise"] for a in deal["allocations"])
         deal["cost_paise"] = weighted_rate([(a["qty_g"], a["cost_paise"]) for a in deal["allocations"]])
-        deal["margin_rate_paise"] = (deal["rate_paise"] - deal["cost_paise"]) if deal["cost_paise"] else 0
+        # per kg of what the sale leaves after labour and freight, not before
+        deal["margin_rate_paise"] = (deal["net_margin_paise"] * 1000 // deal["qty_g"]) if deal["qty_g"] else 0
         # sold short: its cost is not known until stock covers it; until then it is valued at the mark
         deal["short_g"] = deal["uncovered_g"] if deal["status"] == "booked" else 0
         mark = db.q1("SELECT rate_paise FROM marks WHERE product_id=?", (deal["product_id"],))

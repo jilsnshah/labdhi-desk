@@ -50,6 +50,7 @@ export function startTrade(side, opts = {}, appCtx = {}) {
     lots: [], alloc: {}, allocText: {},
     qty_g: 0, rate_paise: 0,
     transporter: null,
+    labour_paise: 0, freight_paise: 0,      // hamali and lorry, always ours
     terms: { freight_by: '', delivery_by: '', payment_terms: '', eway: '', remarks: '' },
     busy: false, error: '',
     shortOK: false,                   // sell: also offer products / warehouses with no stock (sell short)
@@ -76,6 +77,7 @@ async function prefill(d) {
     rate_paise: d.rate_paise, plus_gst: !!d.plus_gst, date: d.deal_date,
     sauda_no: d.ref, saudaAuto: false,
     payment_due: d.payment_due || '', ex_place: d.ex_place || '',
+    labour_paise: d.labour_paise || 0, freight_paise: d.freight_paise || 0,
     transporter: d.transporter_id ? { id: d.transporter_id, name: d.transporter_name } : null,
     terms: { freight_by: d.freight_by || '', delivery_by: d.delivery_by || '', payment_terms: d.payment_terms || '',
              eway: d.eway || '', remarks: d.remarks || '' }
@@ -298,9 +300,11 @@ function render() {
       blockQty(),
       blockRate(),
       sell ? blockSplit() : null,
+      blockCosts(),
       h('div', { class: 'block' }, blockTerms())),
     resultBar());
 
+  paintCosts();
   root.scrollTop = scrollY;
   if (focusKey) {
     const el = root.querySelector(`[data-fkey="${focusKey}"]`);
@@ -585,6 +589,43 @@ function setRate(paise, typing = false) {
   else { sync(); if (typing && ui.rateDial) ui.rateDial.textContent = f.rate(state.rate_paise); }
 }
 
+// ---- what the sauda costs us to handle and move. Always ours, both sides.
+const costsPaise = () => (state.labour_paise || 0) + (state.freight_paise || 0);
+
+function blockCosts() {
+  const perKg = amount => (state.qty_g ? ` · ${f.rate(Math.round(amount * 1000 / state.qty_g))}/kg` : '');
+  const box = (key, name) => h('label', { class: 'cost-field' },
+    h('span', {}, name),
+    h('div', { class: 'cost-input' }, h('i', {}, '₹'),
+      h('input', {
+        class: 'ghost-input num', data: { fkey: key }, placeholder: '0', inputmode: 'decimal',
+        value: state[key] ? String(state[key] / 100) : '',
+        oninput: e => {
+          const rupees = parseFloat(String(e.target.value).replace(/[^0-9.]/g, ''));
+          state[key] = isNaN(rupees) ? 0 : Math.round(rupees * 100);
+          paintCosts(); sync();
+        }
+      })),
+    ui[key + 'Hint'] = h('small', {}, state[key] ? perKg(state[key]) : ''));
+
+  return h('div', { class: 'block' + (state.qty_g ? '' : ' pending') },
+    label('Labour & freight  (yours)', costsPaise() > 0, 'comes off this sauda\'s profit'),
+    h('div', { class: 'costs' }, box('labour_paise', 'Labour'), box('freight_paise', 'Freight'),
+      ui.costsTotal = h('div', { class: 'cost-total' }, '')));
+}
+
+function paintCosts() {
+  for (const key of ['labour_paise', 'freight_paise']) {
+    if (ui[key + 'Hint']) {
+      ui[key + 'Hint'].textContent = state[key] && state.qty_g
+        ? `${f.rate(Math.round(state[key] * 1000 / state.qty_g))}/kg` : '';
+    }
+  }
+  if (ui.costsTotal) {
+    ui.costsTotal.textContent = costsPaise() ? `${f.inr(costsPaise())} off this sauda` : '';
+  }
+}
+
 // ---------------------------------------------------------------- the split
 function blockSplit() {
   if (!state.warehouse || !state.qty_g) return h('div', { class: 'block pending' }, label('Which stock goes out', false));
@@ -611,11 +652,14 @@ function assignPanel(fl) {
   r.rate = h('b', { class: 'num' }, '');
   r.cost = h('b', { class: 'num' }, '');
   r.margin = h('b', { class: 'num' }, '');
+  r.costs = h('b', { class: 'num' }, '');
+  r.costsRow = h('div', {}, h('span', {}, 'Labour & freight'), r.costs);
   r.el = h('div', { class: 'assign' },
     r.label, r.num, r.of, h('div', { class: 'assign-bar' }, r.barI), r.done,
     h('div', { class: 'assign-facts' },
       h('div', {}, h('span', {}, 'Selling at'), r.rate),
       h('div', {}, h('span', {}, 'Your cost'), r.cost),
+      r.costsRow,
       h('div', { class: 'assign-margin' }, h('span', {}, 'Margin'), r.margin)),
     h('button', { class: 'assign-clear', onclick: () => { resetAlloc(); sync(); } }, 'Clear all'));
   paintAssign(fl);
@@ -635,8 +679,13 @@ function paintAssign(fl) {
   r.done.textContent = `${f.qty(fl.assigned)} assigned`;
   r.rate.textContent = state.rate_paise ? f.rate(state.rate_paise) : '—';
   r.cost.textContent = fl.assigned ? f.rate(fl.avgCost) : '—';
-  r.margin.textContent = fl.assigned && state.rate_paise ? f.inr(fl.margin, { sign: true }) : '—';
-  r.margin.className = 'num ' + (fl.assigned ? pnlClass(fl.margin) : 'dim');
+  // the margin here is what is left after labour and freight, like the bar below
+  const net = fl.margin - costsPaise();
+  r.costsRow.hidden = !costsPaise();
+  r.costs.textContent = costsPaise() ? '−' + f.inr(costsPaise()) : '';
+  r.costs.className = 'num down';
+  r.margin.textContent = fl.assigned && state.rate_paise ? f.inr(net, { sign: true }) : '—';
+  r.margin.className = 'num ' + (fl.assigned ? pnlClass(net) : 'dim');
 }
 
 function lotRow(row, fl) {
@@ -699,6 +748,7 @@ function sync() {
   }
   if (ui.rateDial) ui.rateDial.textContent = f.rate(state.rate_paise);
   if (ui.shortNote) ui.shortNote.textContent = shortText();
+  paintCosts();
   if (fl) { for (const row of fl.rows) paintRow(row, fl); paintAssign(fl); }
   paintBar(fl);
 }
@@ -771,9 +821,10 @@ function paintBar(fl) {
   const sell = sellSide();
   const value = valuePaise(state.qty_g, state.rate_paise);
   if (sell && fl && fl.assigned) {
-    r.money.textContent = ready() ? f.inr(fl.margin, { sign: true }) : '—';
-    r.money.className = 'num ' + pnlClass(fl.margin);
-    r.moneyLabel.textContent = 'margin';
+    const net = fl.margin - costsPaise();
+    r.money.textContent = ready() ? f.inr(net, { sign: true }) : '—';
+    r.money.className = 'num ' + pnlClass(net);
+    r.moneyLabel.textContent = costsPaise() ? 'margin after costs' : 'margin';
   } else {
     r.money.textContent = ready() ? f.inr(value) : '—';
     r.money.className = 'num';
@@ -806,6 +857,10 @@ function lineText(fl, value) {
   const bits = [`${f.qty(state.qty_g)} ${state.product.display} @ ${f.rate(state.rate_paise)}`,
     `${sellSide() ? 'from' : 'into'} ${state.warehouse.name}`, `= ${f.inr(value)}`];
   if (fl) bits.push(`cost ${f.rate(fl.avgCost)} · ${fl.used.length} lot${fl.used.length === 1 ? '' : 's'}`);
+  if (costsPaise()) {
+    bits.push(fl ? `margin ${f.inr(fl.margin, { sign: true })} less ${f.inr(costsPaise())} labour & freight`
+                 : `plus ${f.inr(costsPaise())} labour & freight`);
+  }
   return { text: bits.join('   ·   ') };
 }
 
@@ -814,6 +869,7 @@ function ticketValues() {
   return {
     party_id: state.party.id, product_id: state.product.id, warehouse_id: state.warehouse.id,
     qty_g: state.qty_g, rate_paise: state.rate_paise, deal_date: state.date, plus_gst: !!state.plus_gst,
+    labour_paise: state.labour_paise || 0, freight_paise: state.freight_paise || 0,
     payment_due: state.payment_due, ex_place: state.ex_place,
     transporter_id: state.transporter ? state.transporter.id : null,
     freight_by: state.terms.freight_by, delivery_by: state.terms.delivery_by,
@@ -855,6 +911,8 @@ async function confirm() {
       ex_place: (state.ex_place || '').trim() || undefined,
       pins: fl ? fl.rows.map(r => ({ lot_id: r.lot.id, qty_g: r.take })) : undefined,
       allow_short: !!(fl && fl.soldShort),
+      labour_paise: state.labour_paise || 0,
+      freight_paise: state.freight_paise || 0,
       transporter_id: state.transporter ? state.transporter.id : undefined,
       freight_by: state.terms.freight_by || undefined,
       delivery_by: state.terms.delivery_by || undefined,

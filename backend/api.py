@@ -387,6 +387,8 @@ class DealIn(BaseModel):
     warehouse_id: Optional[int] = None     # buy: receiving; sell: dispatching
     qty_g: int
     rate_paise: int
+    labour_paise: int = 0          # hamali etc for this sauda, always ours
+    freight_paise: int = 0         # transport for this sauda, always ours
     plus_gst: bool = True
     deal_date: Optional[str] = None
     sauda_no: Optional[str] = None         # blank means "issue the next one"
@@ -470,6 +472,8 @@ class EditIn(BaseModel):
     warehouse_id: Optional[int] = None
     qty_g: Optional[int] = None
     rate_paise: Optional[int] = None
+    labour_paise: Optional[int] = None
+    freight_paise: Optional[int] = None
     plus_gst: Optional[bool] = None
     deal_date: Optional[str] = None
     payment_due: Optional[str] = None
@@ -489,7 +493,8 @@ def _edit_args(body: EditIn):
     changes = body.dict(exclude_unset=True)
     rehome = bool(changes.pop("rehome", False))
     changes["allow_short"] = bool(changes.pop("allow_short", False))
-    for k in ("party_id", "product_id", "warehouse_id", "qty_g", "rate_paise", "plus_gst", "deal_date"):
+    for k in ("party_id", "product_id", "warehouse_id", "qty_g", "rate_paise", "plus_gst", "deal_date",
+              "labour_paise", "freight_paise"):
         if k in changes and changes[k] is None:
             changes.pop(k)
     return changes, rehome

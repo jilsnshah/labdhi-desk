@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from .. import db
 from ..money import value_paise, weighted_rate
-from . import shorts
+from . import charges, shorts
 from .stock import _CELLS, AVAILABLE, LOT_SELECT, lots_for
 
 
@@ -61,7 +61,8 @@ def totals() -> Dict[str, Any]:
         "short_g": short_g,
         "stock_value_paise": _round_div(row["cost_value"]),
         "unrealised_paise": _round_div(row["mark_value"] - row["marked_cost_value"] + shorts.open_pnl_gp()),
-        "realised_paise": _round_div(realised),
+        "realised_paise": _round_div(realised) - charges.total(),
+        "costs_paise": charges.total(),
         "open_lots": row["open_lots"],
         "warehouses": db.scalar("SELECT COUNT(*) FROM warehouses"),
     }
@@ -174,7 +175,8 @@ def realised_for_product(product_id: int) -> int:
            WHERE d.product_id=? AND a.active=1 AND d.status='booked'""",
         (product_id,),
     )
-    return sum(value_paise(r["qty_g"], r["sale_rate_paise"] - r["cost_paise"]) for r in rows)
+    margin = sum(value_paise(r["qty_g"], r["sale_rate_paise"] - r["cost_paise"]) for r in rows)
+    return margin - charges.total(product_id=product_id)
 
 
 def position_detail(product_id: int) -> Optional[Dict[str, Any]]:

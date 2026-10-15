@@ -85,6 +85,10 @@ stock(product, warehouse) = Σ (qty_g − qty_allocated_g − qty_out_g)
 Invariants, enforced by tests on SQLite and Postgres:
 
 - Bought + found − written off = in stock + sold (sold = the covered part of every sale).
+- Labour and freight (`deals.labour_paise`, `deals.freight_paise`) are whole-deal amounts, always ours.
+  They are subtracted from profit on the deal's own date and touch nothing else: stock is still valued
+  at the purchase rate, and no lot, allocation or margin changes. Every "realised" figure - the desk,
+  a period, a product, a counterparty, the Excel reports - is margins less these.
 - In any warehouse, a product never has free stock and an open short at once: `shorts.cover()` runs at
   the end of every change and covers the oldest short from the oldest stock. Stock shown is free
   stock less open shorts, so it can be negative.

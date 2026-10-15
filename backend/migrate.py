@@ -39,6 +39,22 @@ DEFAULT_WAREHOUSE = "Main"
 UNSPECIFIED_MAKER = "Unspecified"
 
 
+# Columns added after a book was already in use. Adding one is additive and
+# idempotent: existing rows keep their figures and start at zero.
+ADDED_COLUMNS = [
+    ("deals", "labour_paise", "INTEGER NOT NULL DEFAULT 0"),
+    ("deals", "freight_paise", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+
+def add_columns(conn) -> None:
+    """Bring an existing book up to today's columns. Runs on every boot."""
+    for table, column, kind in ADDED_COLUMNS:
+        if db.has_table(conn, table) and not db.has_column(conn, table, column):
+            with db.tx() as c:
+                c.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, kind))
+
+
 def upgrade(conn) -> bool:
     if not db.has_table(conn, "skus"):
         return False

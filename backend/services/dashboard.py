@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from .. import db
 from ..money import fmt_qty, value_paise
-from . import inventory
+from . import charges, inventory
 from .stock import AVAILABLE
 
 
@@ -16,13 +16,16 @@ def _since(days: int) -> str:
 
 
 def realised_between(start: str, end: str) -> int:
+    """Margin of the sales dated in the period, less what every sauda dated in it
+    cost us in labour and freight."""
     rows = db.q(
         """SELECT a.qty_g, a.cost_paise, a.sale_rate_paise
            FROM allocations a JOIN deals d ON d.id=a.sale_deal_id
            WHERE a.active=1 AND d.status='booked' AND d.deal_date BETWEEN ? AND ?""",
         (start, end),
     )
-    return sum(value_paise(r["qty_g"], r["sale_rate_paise"] - r["cost_paise"]) for r in rows)
+    margin = sum(value_paise(r["qty_g"], r["sale_rate_paise"] - r["cost_paise"]) for r in rows)
+    return margin - charges.total(date_from=start, date_to=end)
 
 
 def summary() -> Dict[str, Any]:
@@ -41,6 +44,7 @@ def summary() -> Dict[str, Any]:
         "stock_value_paise": tot["stock_value_paise"],
         "unrealised_paise": tot["unrealised_paise"],
         "realised_paise": tot["realised_paise"],
+        "costs_paise": tot["costs_paise"],          # labour + freight, already off the figures above
         "realised_today_paise": realised_between(today, today),
         "realised_week_paise": realised_between(_since(7), today),
         "realised_month_paise": realised_between(_since(30), today),
@@ -117,6 +121,6 @@ def counterparties(limit: Optional[int] = None, offset: int = 0) -> Dict[str, An
             """SELECT COALESCE(SUM(a.qty_g*(a.sale_rate_paise-a.cost_paise)),0)
                FROM allocations a JOIN deals d ON d.id=a.sale_deal_id
                WHERE a.active=1 AND d.party_id=? AND d.status='booked'""", (c["id"],))
-        c["margin_paise"] = inventory._round_div(gram_paise)
+        c["margin_paise"] = inventory._round_div(gram_paise) - charges.total(party_id=c["id"])
         out.append(c)
     return db.page(out, total, limit, offset)

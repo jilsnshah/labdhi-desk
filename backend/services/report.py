@@ -602,7 +602,8 @@ def tape_workbook(**filters) -> bytes:
             ("Payment terms", 13, None), ("Payment due", 12, DATE), ("Payment status", 16, None),
             ("Transporter", 18, None), ("Transport arranged by", 12, None), ("Freight paid by", 11, None),
             ("Ex-Place", 12, None), ("E-way bill", 14, None), ("Note", 26, None),
-            ("Sold short, not covered (kg)", 14, KG)]
+            ("Sold short, not covered (kg)", 14, KG),
+            ("Labour ₹", 11, MONEY), ("Freight ₹", 12, MONEY), ("Net after costs ₹", 15, MONEY)]
     data, sides = [], []
     for d in booked:
         value, cost, margin = money(d)
@@ -621,7 +622,9 @@ def tape_workbook(**filters) -> bytes:
             d["payment_terms"] or "", _d(d["payment_due"]), status,
             d["transporter_name"] or "", d["delivery_by"] or "", d["freight_by"] or "",
             d["ex_place"] or "", d["eway"] or "", d["remarks"] or "",
-            _kg(d["uncovered_g"]) if sell and d["uncovered_g"] else None])
+            _kg(d["uncovered_g"]) if sell and d["uncovered_g"] else None,
+            round(d["labour_paise"] / 100.0, 2) or None, round(d["freight_paise"] / 100.0, 2) or None,
+            round((margin or 0) - d["costs_paise"] / 100.0, 2)])
         sides.append(d["side"])
     buys_went = {}
     if buy_ids:
@@ -637,6 +640,7 @@ def tape_workbook(**filters) -> bytes:
     _table(ws, 4, cols, data, totals={
         "Qty (kg)": "sum", "Qty (MT)": "sum", "Buy value ₹": "sum", "Sale value ₹": "sum",
         "Cost of sold ₹": "sum", "Margin ₹": "sum", "Sold short, not covered (kg)": "sum",
+        "Labour ₹": "sum", "Freight ₹": "sum", "Net after costs ₹": "sum",
         "Margin %": lambda a, z: "=IFERROR(%s%d/%s%d,0)" % (m, z + 1, c, z + 1)},
         group_fill=lambda i: sell_fill if sides[i] == "sell" else buy_fill, freeze_col=5)
     if not data:
@@ -674,9 +678,11 @@ def tape_workbook(**filters) -> bytes:
     per = {}
     for d in booked:
         p = per.setdefault(d["party_id"], {"d": d, "n": 0, "bg": 0, "bv": 0.0, "sg": 0, "sv": 0.0, "margin": 0.0,
+                                           "costs": 0.0,
                                             "cost": 0.0, "first": d["deal_date"], "last": d["deal_date"]})
         value, cost, margin = money(d)
         p["n"] += 1
+        p["costs"] += d["costs_paise"] / 100.0
         p["first"], p["last"] = min(p["first"], d["deal_date"]), max(p["last"], d["deal_date"])
         if d["side"] == "buy":
             p["bg"] += d["qty_g"]; p["bv"] += value
@@ -689,13 +695,16 @@ def tape_workbook(**filters) -> bytes:
                      _mt(p["bg"]), round(p["bv"], 2), round(p["bv"] / _kg(p["bg"]), 2) if p["bg"] else None,
                      _mt(p["sg"]), round(p["sv"], 2), round(p["sv"] / _kg(p["sg"]), 2) if p["sg"] else None,
                      round(p["margin"], 2), (p["margin"] / p["cost"]) if p["cost"] else None,
+                     round(p["costs"], 2) or None, round(p["margin"] - p["costs"], 2),
                      _d(p["first"]), _d(p["last"])])
     cols = [("Party", 30, None), ("GSTIN", 17, None), ("State", 12, None), ("Phone", 14, None), ("Saudas", 8, '0'),
             ("Bought from them (MT)", 12, MT), ("Purchase value ₹", 15, MONEY), ("Avg buy ₹/kg", 11, RATE),
             ("Sold to them (MT)", 12, MT), ("Sale value ₹", 15, MONEY), ("Avg sale ₹/kg", 11, RATE),
-            ("Margin earned ₹", 14, MONEY), ("Margin %", 9, PCT), ("First sauda", 12, DATE), ("Last sauda", 12, DATE)]
+            ("Margin earned ₹", 14, MONEY), ("Margin %", 9, PCT), ("Labour + freight ₹", 14, MONEY),
+            ("Profit after costs ₹", 15, MONEY), ("First sauda", 12, DATE), ("Last sauda", 12, DATE)]
     _table(ws, 4, cols, data, totals={"Saudas": "sum", "Bought from them (MT)": "sum", "Purchase value ₹": "sum",
-                                      "Sold to them (MT)": "sum", "Sale value ₹": "sum", "Margin earned ₹": "sum"},
+                                      "Sold to them (MT)": "sum", "Sale value ₹": "sum", "Margin earned ₹": "sum",
+                                      "Labour + freight ₹": "sum", "Profit after costs ₹": "sum"},
            freeze_col=2)
 
     # ================================================================ By Product
@@ -704,8 +713,9 @@ def tape_workbook(**filters) -> bytes:
     per = {}
     for d in booked:
         p = per.setdefault(d["product_id"], {"d": d, "nb": 0, "ns": 0, "bg": 0, "bv": 0.0, "sg": 0, "sv": 0.0,
-                                              "margin": 0.0, "cost": 0.0})
+                                              "margin": 0.0, "cost": 0.0, "costs": 0.0})
         value, cost, margin = money(d)
+        p["costs"] += d["costs_paise"] / 100.0
         if d["side"] == "buy":
             p["nb"] += 1; p["bg"] += d["qty_g"]; p["bv"] += value
         else:
@@ -719,15 +729,18 @@ def tape_workbook(**filters) -> bytes:
                      round(p["bv"] / _kg(p["bg"]), 2) if p["bg"] else None, p["ns"], _mt(p["sg"]), round(p["sv"], 2),
                      round(p["sv"] / _kg(p["sg"]), 2) if p["sg"] else None, round(p["cost"], 2), round(p["margin"], 2),
                      (p["margin"] / p["cost"]) if p["cost"] else None,
-                     round(p["margin"] / _kg(p["sg"]), 2) if p["sg"] else None, _mt(stock_now.get(pid_, 0))])
+                     round(p["margin"] / _kg(p["sg"]), 2) if p["sg"] else None,
+                     round(p["costs"], 2) or None, round(p["margin"] - p["costs"], 2), _mt(stock_now.get(pid_, 0))])
     cols = [("Product", 32, None), ("Material", 10, None), ("Grade", 10, None), ("Manufacturer", 17, None),
             ("Buys", 7, '0'), ("Bought (MT)", 11, MT), ("Purchase value ₹", 15, MONEY), ("Avg buy ₹/kg", 11, RATE),
             ("Sells", 7, '0'), ("Sold (MT)", 11, MT), ("Sale value ₹", 15, MONEY), ("Avg sale ₹/kg", 11, RATE),
             ("Cost of sold ₹", 14, MONEY), ("Margin ₹", 13, MONEY), ("Margin %", 9, PCT),
-            ("Margin ₹/kg", 11, MARGIN_RATE), ("In stock now (MT)", 12, MT)]
+            ("Margin ₹/kg", 11, MARGIN_RATE), ("Labour + freight ₹", 14, MONEY),
+            ("Profit after costs ₹", 15, MONEY), ("In stock now (MT)", 12, MT)]
     _table(ws, 4, cols, data, totals={"Buys": "sum", "Bought (MT)": "sum", "Purchase value ₹": "sum", "Sells": "sum",
                                       "Sold (MT)": "sum", "Sale value ₹": "sum", "Cost of sold ₹": "sum",
-                                      "Margin ₹": "sum", "In stock now (MT)": "sum"}, freeze_col=2)
+                                      "Margin ₹": "sum", "Labour + freight ₹": "sum",
+                                      "Profit after costs ₹": "sum", "In stock now (MT)": "sum"}, freeze_col=2)
 
     # ================================================================ By Month
     ws = wb.create_sheet("By Month")
@@ -735,21 +748,26 @@ def tape_workbook(**filters) -> bytes:
     per = {}
     for d in booked:
         key = d["deal_date"][:7]
-        p = per.setdefault(key, {"nb": 0, "ns": 0, "bg": 0, "bv": 0.0, "sg": 0, "sv": 0.0, "margin": 0.0, "cost": 0.0})
+        p = per.setdefault(key, {"nb": 0, "ns": 0, "bg": 0, "bv": 0.0, "sg": 0, "sv": 0.0, "margin": 0.0,
+                                 "cost": 0.0, "costs": 0.0})
         value, cost, margin = money(d)
+        p["costs"] += d["costs_paise"] / 100.0
         if d["side"] == "buy":
             p["nb"] += 1; p["bg"] += d["qty_g"]; p["bv"] += value
         else:
             p["ns"] += 1; p["sg"] += d["qty_g"]; p["sv"] += value; p["margin"] += margin; p["cost"] += cost
     data = [[datetime.strptime(k, "%Y-%m").strftime("%b %Y"), p["nb"], _mt(p["bg"]), round(p["bv"], 2), p["ns"],
              _mt(p["sg"]), round(p["sv"], 2), round(p["cost"], 2), round(p["margin"], 2),
-             (p["margin"] / p["cost"]) if p["cost"] else None] for k, p in sorted(per.items())]
+             (p["margin"] / p["cost"]) if p["cost"] else None,
+             round(p["costs"], 2) or None, round(p["margin"] - p["costs"], 2)] for k, p in sorted(per.items())]
     cols = [("Month", 11, None), ("Buys", 7, '0'), ("Bought (MT)", 11, MT), ("Purchase value ₹", 15, MONEY),
             ("Sells", 7, '0'), ("Sold (MT)", 11, MT), ("Sale value ₹", 15, MONEY), ("Cost of sold ₹", 14, MONEY),
-            ("Margin ₹", 13, MONEY), ("Margin %", 9, PCT)]
+            ("Margin ₹", 13, MONEY), ("Margin %", 9, PCT), ("Labour + freight ₹", 14, MONEY),
+            ("Profit after costs ₹", 15, MONEY)]
     _table(ws, 4, cols, data, totals={"Buys": "sum", "Bought (MT)": "sum", "Purchase value ₹": "sum", "Sells": "sum",
                                       "Sold (MT)": "sum", "Sale value ₹": "sum", "Cost of sold ₹": "sum",
-                                      "Margin ₹": "sum"}, freeze_col=2)
+                                      "Margin ₹": "sum", "Labour + freight ₹": "sum",
+                                      "Profit after costs ₹": "sum"}, freeze_col=2)
 
     # ================================================================ Cancelled
     ws = wb.create_sheet("Cancelled")
@@ -776,6 +794,8 @@ def tape_workbook(**filters) -> bytes:
     sv = sum(_money(d["qty_g"], d["rate_paise"]) for d in sells)
     margin = sum(money(d)[2] for d in sells)
     cost = sum(money(d)[1] for d in sells)
+    labour = sum(d["labour_paise"] for d in booked) / 100.0
+    freight = sum(d["freight_paise"] for d in booked) / 100.0
     sold_g = sum(d["qty_g"] for d in sells)
     overdue = [d for d in booked if (due_status(d)[0] or 0) < 0]
     recv_over = sum(_money(d["qty_g"], d["rate_paise"]) for d in overdue if d["side"] == "sell")
@@ -786,8 +806,10 @@ def tape_workbook(**filters) -> bytes:
         ("Avg buy ₹/kg", round(bv / _kg(sum(d["qty_g"] for d in buys)), 2) if buys else 0, RATE),
         ("Sold (MT)", _mt(sold_g), MT), ("Sale value", round(sv, 2), MONEY),
         ("Avg sale ₹/kg", round(sv / _kg(sold_g), 2) if sold_g else 0, RATE),
-        ("Cost of material sold", round(cost, 2), MONEY), ("Margin", round(margin, 2), MONEY),
+        ("Cost of material sold", round(cost, 2), MONEY), ("Margin on material", round(margin, 2), MONEY),
         ("Margin %", (margin / cost) if cost else 0, PCT),
+        ("Labour", round(labour, 2), MONEY), ("Freight", round(freight, 2), MONEY),
+        ("Profit after costs", round(margin - labour - freight, 2), MONEY),
         ("Overdue to receive", round(recv_over, 2), MONEY), ("Overdue to pay", round(pay_over, 2), MONEY),
         ("Cancelled saudas", len(cancelled), '0'),
     ]

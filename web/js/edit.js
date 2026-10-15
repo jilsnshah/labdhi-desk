@@ -22,7 +22,7 @@ const blank = v => (v === undefined || v === null || String(v).trim() === '' ? n
 // ticket shows (sales only); it is sent only when the split itself changed.
 export function diffDeal(deal, next, pins) {
   const c = {};
-  for (const k of ['party_id', 'product_id', 'warehouse_id', 'qty_g', 'rate_paise']) {
+  for (const k of ['party_id', 'product_id', 'warehouse_id', 'qty_g', 'rate_paise', 'labour_paise', 'freight_paise']) {
     if (next[k] !== undefined && next[k] !== deal[k]) c[k] = next[k];
   }
   if (next.plus_gst !== undefined && !!next.plus_gst !== !!deal.plus_gst) c.plus_gst = !!next.plus_gst;
@@ -99,7 +99,7 @@ function effectsBlock(effects) {
     ...stock.map(c => h('div', { class: 'rv-line' },
       h('span', {}, `${c.product} · ${c.warehouse}`),
       arrow(f.qty(c.before_g), f.qty(c.after_g)))),
-    realised ? h('div', { class: 'rv-line rv-total' }, h('span', {}, 'Realised profit, all sales'),
+    realised ? h('div', { class: 'rv-line rv-total' }, h('span', {}, 'Profit on the book'),
       h('b', { class: pnlClass(realised) }, f.inr(realised, { sign: true }))) : null);
 }
 

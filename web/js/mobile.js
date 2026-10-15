@@ -308,8 +308,11 @@ function dealCard(d, reload) {
       cell('Rate (₹/kg)', f.perKg(d.rate_paise)),
       cell('Warehouse', d.warehouse),
       cell('Delivery', d.delivery_by)),
-    sell ? h('div', { class: 'mdeal-margin ' + (d.margin_paise >= 0 ? 'up' : 'down') },
-      `margin ${f.inr(d.margin_paise, { sign: true, compact: true })}`,
+    sell || d.costs_paise ? h('div', { class: 'mdeal-margin ' + (d.net_margin_paise >= 0 ? 'up' : 'down') },
+      sell ? `margin ${f.inr(d.net_margin_paise, { sign: true, compact: true })}`
+           : `labour & freight ${f.inr(-d.costs_paise, { sign: true, compact: true })}`,
+      sell && d.costs_paise ? h('span', { class: 'dim', style: { marginLeft: '8px' } },
+        `after ${f.inr(d.costs_paise, { compact: true })} costs`) : null,
       d.status === 'booked' && d.uncovered_g ? h('span', { class: 'short-tag', style: { marginLeft: '8px' } },
         `${f.qty(d.uncovered_g, { short: true })} sold short`) : null) : null);
 
@@ -325,6 +328,9 @@ function dealCard(d, reload) {
       h('div', { class: 'mdeal-grid wide' },
         cell('GST', full.plus_gst ? 'Extra' : 'Included'),
         cell('Value', f.inr(full.value_paise, { compact: true })),
+        full.labour_paise ? cell('Labour', f.inr(full.labour_paise)) : null,
+        full.freight_paise ? cell('Freight', f.inr(full.freight_paise)) : null,
+        full.costs_paise ? cell(sell ? 'After costs' : 'Costs', f.inr(full.net_margin_paise, { sign: true })) : null,
         cell('Payment due', full.payment_due ? f.date(full.payment_due) : ''),
         cell('Ex-Place', full.ex_place),
         cell('Transporter', full.transporter_name),

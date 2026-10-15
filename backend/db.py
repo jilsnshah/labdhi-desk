@@ -188,8 +188,9 @@ def sync_sequence(conn, table: str) -> None:
 # ------------------------------------------------------------------ boot
 def init_db() -> None:
     conn = connect()
-    from .migrate import upgrade
+    from .migrate import add_columns, upgrade
     upgrade(conn)                              # a v1 book is rebuilt first, if there is one
+    add_columns(conn)                          # then any column added since it was last opened
     with open(SCHEMA) as fh:
         schema = fh.read()
     with tx() as c:

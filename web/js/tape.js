@@ -92,9 +92,11 @@ function dealRow(d, ctx, reload) {
     h('td', {}, h('span', { class: 'pill ' + d.status }, f.statusLabel(d.status))),
     h('td', {}, d.delivery_by || h('span', { class: 'dim' }, '—')),
     h('td', { class: 'r mono' }, sell
-      ? [h('b', { class: pnlClass(d.margin_paise) }, f.inr(d.margin_paise, { sign: true, compact: true })),
+      ? [h('b', { class: pnlClass(d.net_margin_paise) }, f.inr(d.net_margin_paise, { sign: true, compact: true })),
+         d.costs_paise ? h('div', { class: 'dim' }, `after ${f.inr(d.costs_paise, { compact: true })} costs`) : null,
          d.status === 'booked' && d.uncovered_g ? h('div', {}, h('span', { class: 'short-tag' }, `${f.qty(d.uncovered_g, { short: true })} short`)) : null]
-      : h('span', { class: 'dim' }, d.sold_g ? `${f.mt(d.sold_g)} sold` : '—')));
+      : [d.costs_paise ? h('b', { class: 'down' }, f.inr(-d.costs_paise, { sign: true, compact: true })) : null,
+         h('span', { class: 'dim' }, d.sold_g ? `${f.mt(d.sold_g)} sold` : (d.costs_paise ? 'labour & freight' : '—'))]));
   tr.addEventListener('click', async () => {
     if (open) { open.remove(); open = null; tr.classList.remove('open'); return; }
     const full = await api.deal(d.id);
@@ -132,8 +134,13 @@ export function dealDetail(deal, ctx, reload) {
       fact('Payment terms', deal.payment_terms),
       fact('E-way bill', deal.eway),
       fact('Note', deal.remarks),
-      sell ? fact('Margin', f.inr(deal.margin_paise, { sign: true }) + (deal.short_g ? ` on ${f.qty(deal.qty_g - deal.short_g)} covered` : ''))
+      sell ? fact('Margin on material', f.inr(deal.margin_paise, { sign: true }) + (deal.short_g ? ` on ${f.qty(deal.qty_g - deal.short_g)} covered` : ''))
            : fact('Sold so far', f.qty(deal.sold_g)),
+      fact('Labour', deal.labour_paise ? f.inr(deal.labour_paise) : null),
+      fact('Freight', deal.freight_paise ? f.inr(deal.freight_paise) : null),
+      deal.costs_paise
+        ? fact(sell ? 'Margin after costs' : 'Costs on this purchase', f.inr(deal.net_margin_paise, { sign: true }))
+        : null,
       sell && deal.short_g ? fact('Sold short', `${f.qty(deal.short_g)} — covered by the next stock into ${deal.warehouse}` +
         (deal.short_est_paise !== null ? ` · est. ${f.inr(deal.short_est_paise, { sign: true })} at mark` : '')) : null),
 

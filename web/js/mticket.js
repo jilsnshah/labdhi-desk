@@ -41,6 +41,7 @@ export function startTicket(side, opts = {}, appCtx) {
     editingLot: null,
     shortOK: false,                   // sell: also offer products / warehouses with no stock (sell short)
     transporter: null,
+    labour_paise: 0, freight_paise: 0,      // hamali and lorry, always ours
     terms: { freight_by: '', delivery_by: '', payment_terms: '', eway: '', remarks: '' },
     sauda_no: '', saudaAuto: true,
     plus_gst: true, payment_due: '', ex_place: '',
@@ -68,6 +69,7 @@ async function prefill(d) {
     rate_paise: d.rate_paise, plus_gst: !!d.plus_gst, date: d.deal_date,
     sauda_no: d.ref, saudaAuto: false,
     payment_due: d.payment_due || '', ex_place: d.ex_place || '',
+    labour_paise: d.labour_paise || 0, freight_paise: d.freight_paise || 0,
     transporter: d.transporter_id ? { id: d.transporter_id, name: d.transporter_name } : null,
     terms: { freight_by: d.freight_by || '', delivery_by: d.delivery_by || '', payment_terms: d.payment_terms || '',
              eway: d.eway || '', remarks: d.remarks || '' }
@@ -490,7 +492,7 @@ function stepRate() {
   const paise = live || 0;
   const cost = ms.side === 'sell' ? sellCost() : 0;
   const marginRate = cost && paise ? paise - cost : 0;
-  const margin = cost && paise ? sellMargin(paise) : 0;
+  const margin = (cost && paise ? sellMargin(paise) : 0) - costsPaise();
   const good = margin >= 0;
   const shown = typedNow ? (ms.entry || '0') : f.perKg(ms.rate_paise);
   return [
@@ -502,7 +504,8 @@ function stepRate() {
             h('b', { class: 'num ' + (good ? 'up' : 'down') }, f.inr(margin, { sign: true })),
             h('span', { class: 'num ' + (good ? 'up' : 'down') }, f.rateDelta(marginRate) + '/kg')),
           h('div', { class: 'mlive-sub' }, `your cost ${f.rate(cost)}/kg · sale value ${f.inr(valuePaise(ms.qty_g, paise))}` +
-            (shortHere() ? ` · margin on ${f.qty(coveredHere())}, ${f.qty(shortHere())} short` : '')))
+            (shortHere() ? ` · margin on ${f.qty(coveredHere())}, ${f.qty(shortHere())} short` : '') +
+            (costsPaise() ? ` · less ${f.inr(costsPaise())} costs` : '')))
       : (paise ? h('div', { class: 'mlive' },
           h('div', { class: 'mlive-top' }, h('b', { class: 'num' }, f.inr(valuePaise(ms.qty_g, paise)))),
           h('div', { class: 'mlive-sub' }, ms.side === 'sell'
@@ -615,7 +618,8 @@ function stepReview() {
   const sell = ms.side === 'sell';
   const cost = sell ? sellCost() : 0;
   const marginRate = cost ? ms.rate_paise - cost : 0;
-  const margin = cost ? sellMargin(ms.rate_paise) : 0;
+  const gross = cost ? sellMargin(ms.rate_paise) : 0;
+  const margin = gross - costsPaise();
   const short = shortHere();
   return [
     h('div', { class: 'mt-q' }, ms.edit ? 'Change what you need' : (sell ? 'Confirm the sale' : 'Confirm the purchase')),
@@ -630,6 +634,7 @@ function stepReview() {
       short ? row('Sold short', `${f.qty(short)} — ${ms.warehouse.name} goes to −${f.qty(short)}`, () => jump('qty')) : null,
       row('Rate', f.rate(ms.rate_paise) + '/kg', () => jump('rate')),
       ms.edit && sell && openLots().length > 1 ? row('Lots', splitSummary(), () => jump('split')) : null,
+      row('Labour & freight', costsText(), openCosts),
       row('GST', ms.plus_gst ? 'Extra' : 'Included', () => { ms.plus_gst = !ms.plus_gst; paint(); }),
       row('Value', f.inr(valuePaise(ms.qty_g, ms.rate_paise))),
       row('Date', f.date(ms.date), openTerms),
@@ -641,7 +646,8 @@ function stepReview() {
             h('b', { class: 'num ' + (margin >= 0 ? 'up' : 'down') }, f.inr(margin, { sign: true })),
             h('span', { class: 'num ' + (margin >= 0 ? 'up' : 'down') }, f.rateDelta(marginRate) + '/kg')),
           h('div', { class: 'mlive-sub' }, `bought at ${f.rate(cost)}/kg, selling at ${f.rate(ms.rate_paise)}/kg` +
-            (short ? ` · on ${f.qty(coveredHere())} covered` : '')))
+            (short ? ` · on ${f.qty(coveredHere())} covered` : '') +
+            (costsPaise() ? ` · after ${f.inr(costsPaise())} labour & freight` : '')))
       : null,
     short ? h('div', { class: 'need short' }, `${f.qty(short)} is sold short. The next ${ms.product.display} bought or ` +
       `moved into ${ms.warehouse.name} covers it first; its margin is known then.`) : null,
@@ -652,6 +658,41 @@ function stepReview() {
 function splitSummary() {
   const used = flow().rows.filter(r => r.take > 0);
   return used.map(r => `${f.qty(r.take, { short: true })} ${r.lot.supplier_name}`).join(' · ') || '—';
+}
+
+// Labour and freight are ours on both sides and come straight off this sauda.
+const costsPaise = () => (ms.labour_paise || 0) + (ms.freight_paise || 0);
+
+function costsText() {
+  if (!costsPaise()) return 'None';
+  if (!ms.freight_paise) return `${f.inr(ms.labour_paise)} labour`;
+  if (!ms.labour_paise) return `${f.inr(ms.freight_paise)} freight`;
+  return `${f.inr(costsPaise())} · ${f.inr(ms.labour_paise)} + ${f.inr(ms.freight_paise)}`;
+}
+
+function openCosts() {
+  const rupees = paise => (paise ? String(paise / 100) : '');
+  const paise = v => {
+    const n = parseFloat(String(v || '').replace(/[^0-9.]/g, ''));
+    return isNaN(n) ? 0 : Math.round(n * 100);
+  };
+  const perKg = paid => (ms.qty_g && paid ? `${f.rate(Math.round(paid * 1000 / ms.qty_g))}/kg` : ' ');
+  openForm({
+    title: 'Labour & freight', sub: 'Yours on this sauda — taken off its profit', submitLabel: 'Done',
+    fields: [
+      { key: 'labour', label: 'Labour (₹ total)', value: rupees(ms.labour_paise), inputmode: 'decimal',
+        half: true, hint: perKg(ms.labour_paise) },
+      { key: 'freight', label: 'Freight (₹ total)', value: rupees(ms.freight_paise), inputmode: 'decimal',
+        half: true, hint: perKg(ms.freight_paise) }
+    ],
+    onChange: (key, value, form) => form.hint(key, perKg(paise(value))),
+    submit: v => {
+      ms.labour_paise = paise(v.labour);
+      ms.freight_paise = paise(v.freight);
+      paint();
+      return true;
+    }
+  });
 }
 
 function termsSummary() {
@@ -790,6 +831,7 @@ async function saveEdit() {
   const changes = diffDeal(d, {
     party_id: ms.party.id, product_id: ms.product.id, warehouse_id: ms.warehouse.id,
     qty_g: ms.qty_g, rate_paise: ms.rate_paise, deal_date: ms.date, plus_gst: !!ms.plus_gst,
+    labour_paise: ms.labour_paise || 0, freight_paise: ms.freight_paise || 0,
     payment_due: ms.payment_due, ex_place: ms.ex_place,
     transporter_id: ms.transporter ? ms.transporter.id : null,
     freight_by: ms.terms.freight_by, delivery_by: ms.terms.delivery_by,
@@ -831,6 +873,8 @@ async function book() {
       remarks: ms.terms.remarks || undefined,
       pins: pins(),
       allow_short: shortHere() > 0,
+      labour_paise: ms.labour_paise || 0,
+      freight_paise: ms.freight_paise || 0,
       confirm: true
     });
     done(sell, deal);
