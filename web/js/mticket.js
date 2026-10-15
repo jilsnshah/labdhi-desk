@@ -909,8 +909,9 @@ async function book() {
 function done(sell, deal) {
   const el = h('div', { class: 'mdone' },
     h('div', {},
-      h('b', { class: sell ? 'up' : '' }, sell ? f.inr(deal.margin_paise || 0, { sign: true }) : f.qty(deal.qty_g)),
-      h('span', {}, `${deal.ref} · ${deal.party_name}`)));
+      h('b', { class: sell ? 'up' : '' }, sell ? f.inr(deal.net_margin_paise || 0, { sign: true }) : f.qty(deal.qty_g)),
+      h('span', {}, `${deal.ref} · ${deal.party_name}`
+        + (deal.costs_paise ? ` · after ${f.inr(deal.costs_paise)} costs` : ''))));
   document.body.appendChild(el);
   if (navigator.vibrate) navigator.vibrate(18);
   setTimeout(() => el.remove(), 1100);

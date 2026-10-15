@@ -209,9 +209,11 @@ def _book_sell(conn, deal, pins=None, policy=None, allow_short: bool = False) ->
         raise DealError("%s still holds %s of %s - take all of it before selling short"
                         % (n["warehouse"], fmt_qty(left), n["product"]))
     db.log(conn, "deal", deal["id"], "book",
-           "Sold %s %s @ %s from %s  (margin %s%s)"
+           "Sold %s %s @ %s from %s  (margin %s%s%s)"
            % (fmt_qty(deal["qty_g"]), n["product"], fmt_money(deal["rate_paise"]),
-              n["warehouse"], fmt_money(_margin_of(deal["id"])),
+              n["warehouse"], fmt_money(_margin_of(deal["id"]) - charges.of(dict(deal, status="booked"))),
+              " after %s labour & freight" % fmt_money(charges.of(dict(deal, status="booked")))
+              if charges.of(dict(deal, status="booked")) else "",
               ", %s short" % fmt_qty(plan["uncovered_g"]) if plan["uncovered_g"] else ""),
            {"ref": deal["ref"], "picks": plan["picks"], "uncovered_g": plan["uncovered_g"]},
            undoable=True)

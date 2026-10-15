@@ -940,8 +940,9 @@ async function confirm() {
       remarks: state.terms.remarks || undefined,
       confirm: true
     });
-    celebrate(sell ? f.inr(deal.margin_paise || 0, { sign: true }) : f.qty(deal.qty_g),
-      `${deal.ref} · ${deal.party_name}`, sell ? 'sell' : 'buy');
+    celebrate(sell ? f.inr(deal.net_margin_paise || 0, { sign: true }) : f.qty(deal.qty_g),
+      `${deal.ref} · ${deal.party_name}` + (deal.costs_paise ? ` · after ${f.inr(deal.costs_paise)} labour & freight` : ''),
+      sell ? 'sell' : 'buy');
     toast(sell
       ? `Sold ${f.qty(deal.qty_g)} ${deal.product} to ${deal.party_name} from ${deal.warehouse}`
       : `Bought ${f.qty(deal.qty_g)} ${deal.product} from ${deal.party_name} into ${deal.warehouse}${f.coveredNote(deal)}`,

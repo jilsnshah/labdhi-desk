@@ -143,6 +143,128 @@ class Costs(unittest.TestCase):
         self.assertEqual(api.summary()["realised_paise"], 30000 * RS - 9000 * RS)
         audit(self)
 
+    # ------------------------------------------------------------ one purchase, many buyers
+    def test_one_purchase_sold_to_three_buyers_counts_its_costs_once(self):
+        """A purchase's labour and freight belong to the purchase, however many
+        buyers its material goes to; each sale carries only its own."""
+        buy("S1", 12 * MT, 9500, "2026-09-01", labour_paise=1200 * RS, freight_paise=28800 * RS)
+        a = sell("B1", 5 * MT, 10000, "2026-09-02", labour_paise=500 * RS)["id"]
+        b = sell("B2", 4 * MT, 10200, "2026-09-03", freight_paise=4000 * RS)["id"]
+        c = sell("B3", 3 * MT, 9900, "2026-09-04", labour_paise=300 * RS, freight_paise=1700 * RS)["id"]
+
+        # each sale: its own kilos at its own rate against the one lot at Rs 95, less its own costs
+        self.assertEqual(self.deal(a)["margin_paise"], 5000 * 500)            # Rs 25,000
+        self.assertEqual(self.deal(a)["net_margin_paise"], 25000 * RS - 500 * RS)
+        self.assertEqual(self.deal(b)["margin_paise"], 4000 * 700)            # Rs 28,000
+        self.assertEqual(self.deal(b)["net_margin_paise"], 28000 * RS - 4000 * RS)
+        self.assertEqual(self.deal(c)["margin_paise"], 3000 * 400)            # Rs 12,000
+        self.assertEqual(self.deal(c)["net_margin_paise"], 12000 * RS - 2000 * RS)
+
+        # the purchase's Rs 30,000 is counted once, not once per buyer
+        s = api.summary()
+        self.assertEqual(s["costs_paise"], (30000 + 500 + 4000 + 2000) * RS)
+        self.assertEqual(s["realised_paise"], (25000 + 28000 + 12000) * RS - (30000 + 6500) * RS)
+        self.assertEqual(s["realised_paise"],
+                         sum(self.deal(d)["net_margin_paise"] for d in (a, b, c)) - 30000 * RS)
+        # and by party: each buyer carries only what their own sauda cost
+        who = {p["name"]: p["margin_paise"] for p in api.counterparties(limit=10)["items"]}
+        self.assertEqual(who, {"B1": 24500 * RS, "B2": 24000 * RS, "B3": 10000 * RS, "S1": -30000 * RS})
+        conserved(self, self.P)
+        audit(self)
+
+    def test_the_unsold_part_keeps_no_share_of_the_costs(self):
+        """Half the purchase is still in stock: its value and open P&L are the
+        rate it was bought at, with no labour or freight folded in."""
+        buy("S1", 10 * MT, 9500, "2026-09-01", labour_paise=1000 * RS, freight_paise=24000 * RS)
+        sell("B1", 6 * MT, 10000, "2026-09-02", freight_paise=3000 * RS)
+        api.set_mark(self.P, api.MarkIn(rate_paise=9800))
+        s = api.summary()
+        self.assertEqual(s["stock_g"], 4 * MT)
+        self.assertEqual(s["stock_value_paise"], 4000 * 9500)                 # 4 MT at Rs 95 flat
+        self.assertEqual(s["unrealised_paise"], 4000 * 300)                   # mark 98 less cost 95
+        self.assertEqual(s["realised_paise"], 6000 * 500 - 28000 * RS)
+        # selling the rest later brings no further costs with it
+        sell("B2", 4 * MT, 10100, "2026-09-05")
+        self.assertEqual(api.summary()["realised_paise"],
+                         (6000 * 500 + 4000 * 600) - 28000 * RS)
+        audit(self)
+
+    def test_partial_sales_across_two_purchases_with_costs_on_both(self):
+        buy("S1", 5 * MT, 9500, "2026-09-01", freight_paise=5000 * RS)
+        buy("S2", 5 * MT, 9700, "2026-09-02", freight_paise=6000 * RS)
+        # one sale spanning both lots, FIFO: 5 MT at 95 then 2 MT at 97
+        d = sell("B1", 7 * MT, 10100, "2026-09-03", labour_paise=1400 * RS)["id"]
+        self.assertEqual(self.deal(d)["margin_paise"], 5000 * 600 + 2000 * 400)
+        self.assertEqual(self.deal(d)["net_margin_paise"], (30000 + 8000 - 1400) * RS)
+        self.assertEqual(api.summary()["realised_paise"], (38000 - 1400 - 11000) * RS)
+        audit(self)
+
+    # ------------------------------------------------------------ cancelling
+    def test_cancelling_one_of_three_sales_drops_only_its_costs(self):
+        buy("S1", 12 * MT, 9500, "2026-09-01", freight_paise=30000 * RS)
+        a = sell("B1", 5 * MT, 10000, "2026-09-02", labour_paise=500 * RS)["id"]
+        b = sell("B2", 4 * MT, 10200, "2026-09-03", freight_paise=4000 * RS)["id"]
+        c = sell("B3", 3 * MT, 9900, "2026-09-04", freight_paise=2000 * RS)["id"]
+        deals.cancel_deal(b)
+        # B2's own Rs 4,000 and its Rs 28,000 margin are both gone; the others stand
+        self.assertEqual(self.deal(b)["costs_paise"], 0)
+        self.assertEqual(self.deal(b)["net_margin_paise"], 0)
+        self.assertEqual(self.deal(a)["net_margin_paise"], (25000 - 500) * RS)
+        self.assertEqual(self.deal(c)["net_margin_paise"], (12000 - 2000) * RS)
+        s = api.summary()
+        self.assertEqual(s["costs_paise"], (30000 + 500 + 2000) * RS)
+        self.assertEqual(s["realised_paise"], (25000 + 12000 - 32500) * RS)
+        self.assertEqual(s["stock_g"], 4 * MT)                    # B2's material is back
+        # a party whose only sauda was cancelled is no longer a counterparty at all
+        who = {p["name"]: p["margin_paise"] for p in api.counterparties(limit=10)["items"]}
+        self.assertNotIn("B2", who)
+        self.assertEqual(who["B1"], 24500 * RS)
+        audit(self)
+
+    def test_cancelling_the_purchase_drops_its_costs_and_moves_the_sales(self):
+        buy("S1", 6 * MT, 9500, "2026-09-01", freight_paise=12000 * RS)      # the one being cancelled
+        buy("S2", 6 * MT, 9700, "2026-09-02", freight_paise=9000 * RS)       # what the sales move onto
+        a = sell("B1", 3 * MT, 10000, "2026-09-03", labour_paise=600 * RS)["id"]
+        b = sell("B2", 3 * MT, 10100, "2026-09-04", freight_paise=900 * RS)["id"]
+        p = revise.preview_cancel(1)
+        self.assertTrue(p["needs_rehome"])
+        promised = {x["ref"]: x["margin_after_paise"] for x in p["effects"]["sales"]}
+        deals.cancel_deal(1, rehome=True)
+        # both sales now draw on S2's lot at Rs 97, and each keeps its own costs
+        self.assertEqual(self.deal(a)["margin_paise"], 3000 * 300)
+        self.assertEqual(self.deal(a)["net_margin_paise"], (9000 - 600) * RS)
+        self.assertEqual(self.deal(b)["margin_paise"], 3000 * 400)
+        self.assertEqual(self.deal(b)["net_margin_paise"], (12000 - 900) * RS)
+        self.assertEqual({self.deal(d)["ref"]: self.deal(d)["net_margin_paise"] for d in (a, b)}, promised)
+        s = api.summary()
+        self.assertEqual(s["costs_paise"], (9000 + 600 + 900) * RS)          # the cancelled Rs 12,000 is gone
+        self.assertEqual(s["realised_paise"], (9000 + 12000 - 10500) * RS)
+        audit(self)
+
+    def test_cancelling_everything_leaves_nothing_behind(self):
+        before = api.summary()
+        buy("S1", 8 * MT, 9500, "2026-09-01", labour_paise=800 * RS, freight_paise=20000 * RS)
+        a = sell("B1", 3 * MT, 10000, "2026-09-02", freight_paise=3000 * RS)["id"]
+        b = sell("B2", 2 * MT, 10100, "2026-09-03", labour_paise=200 * RS)["id"]
+        deals.cancel_deal(b)
+        deals.cancel_deal(a)
+        deals.cancel_deal(1)
+        after = api.summary()
+        self.assertEqual((after["realised_paise"], after["costs_paise"], after["stock_g"]),
+                         (before["realised_paise"], 0, 0))
+        audit(self)
+
+    def test_undoing_a_sale_with_costs_puts_the_book_back(self):
+        buy("S1", 8 * MT, 9500, "2026-09-01", freight_paise=16000 * RS)
+        before = book()
+        sell("B1", 3 * MT, 10000, "2026-09-02", labour_paise=300 * RS, freight_paise=2700 * RS)
+        deals.undo_event(int(deals.last_undoable()["id"]))
+        after = book()
+        for key in ("summary", "stock", "positions", "lots", "allocations", "marks"):
+            self.assertEqual(before[key], after[key], key)
+        self.assertEqual(api.summary()["realised_paise"], -16000 * RS)
+        audit(self)
+
     # ------------------------------------------------------------ the reports
     def test_the_excel_report_shows_and_totals_them(self):
         from openpyxl import load_workbook
