@@ -9,6 +9,7 @@ import { h, mount, svg, toast, debounce } from './ui.js';
 import * as f from './fmt.js';
 import { api } from './api.js';
 import { pagedList } from './lists.js';
+import { renderMessages } from './messages-setup.js';
 import { partyForm, productForm, warehouseForm, markForm, transferForm, adjustForm, partySub } from './forms.js';
 import { removeRecord, nameForm } from './setup.js';
 import { MOVE_LABEL } from './stock.js';
@@ -352,7 +353,7 @@ function dealCard(d, reload) {
       sell && full.short_g && lines.length ? h('div', { class: 'mflow-empty neg' }, `${f.qty(full.short_g)} sold short — covered by the next stock into ${full.warehouse}.`) : null,
       full.status === 'booked' ? h('button', {
         class: 'mmore wa', style: { marginTop: '10px' },
-        onclick: () => sendSauda(full, (ctx.boot && ctx.boot.settings && ctx.boot.settings.company_name))
+        onclick: () => sendSauda(full, ctx.boot && ctx.boot.settings)
       }, 'Send on WhatsApp') : null,
       full.status === 'booked' ? h('button', {
         class: 'mmore', style: { marginTop: '10px' }, onclick: () => ctx.editDeal(full)
@@ -368,12 +369,28 @@ function dealCard(d, reload) {
 
 // ==================================================================== setup
 const SETUP_TABS = [['parties', 'Parties'], ['products', 'Products'], ['warehouses', 'Warehouses'],
-                    ['materials', 'Materials'], ['manufacturers', 'Makers'], ['states', 'States']];
+                    ['materials', 'Materials'], ['manufacturers', 'Makers'], ['states', 'States'],
+                    ['messages', 'Messages']];
+
+// The messages editor is one column of cards, so the phone shows the same screen
+// the desktop does, under the tabs it already has.
+function mobileMessages(root, appCtx, again) {
+  const tabs = h('div', { class: 'mchips g3 filter', style: { padding: '0 0 10px' } },
+    ...SETUP_TABS.map(([key, text]) => h('button', {
+      class: 'mchip' + (key === 'messages' ? ' on' : ''),
+      onclick: () => { ctx.setupTab = key; ctx.setupFilter = null; again(); }
+    }, text)));
+  const body = h('div', {});
+  mount(root, h('div', { class: 'view' },
+    h('div', { class: 'mflow', style: { paddingTop: '14px' } }, tabs, body)));
+  renderMessages(body, appCtx, { phone: true });
+}
 
 export function renderMobileSetup(root, appCtx) {
   ctx = appCtx || ctx;
   const tab = ctx.setupTab || 'parties';
   const again = () => renderMobileSetup(root, ctx);
+  if (tab === 'messages') return mobileMessages(root, ctx, again);
   const cfg = MSETUP[tab];
   let query = '';
   const count = countEl();

@@ -950,7 +950,7 @@ async function confirm() {
     state = null;
     ctx.go('desk');
     ctx.refresh();
-    sendSauda(deal, (ctx.boot && ctx.boot.settings && ctx.boot.settings.company_name), { auto: true });
+    sendSauda(deal, ctx.boot && ctx.boot.settings, { auto: true });
   } catch (err) {
     state.busy = false; state.error = err.message; render();
   }

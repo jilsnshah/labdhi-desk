@@ -177,5 +177,19 @@ class TestEveryEndpoint(unittest.TestCase):
         self.assertTrue(all(l["warehouse_id"] == self.wh["Mundra"] for l in plan["lots"]))
 
 
+    def test_the_whatsapp_messages_are_settings(self):
+        """Both messages are plain text kept with the other settings, so the
+        trader can rewrite them without the app changing."""
+        party = "Sauda {ref} · {qty} of {product} @ {rate}"
+        internal = "{ref}: margin {margin} after {costs}"
+        saved = api.save_settings(api.SettingsIn(sauda_template=party, internal_template=internal))
+        self.assertEqual((saved["sauda_template"], saved["internal_template"]), (party, internal))
+        self.assertEqual(api.bootstrap()["settings"]["internal_template"], internal)
+        # other settings are untouched by it
+        self.assertEqual(saved["company_name"], db.settings()["company_name"])
+        api.save_settings(api.SettingsIn(sauda_template="", internal_template=""))
+        self.assertEqual(db.settings()["sauda_template"], "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

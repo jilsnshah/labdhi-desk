@@ -75,7 +75,14 @@ of the same product in the same warehouse (shown before and after, sale by
 sale); what other stock cannot cover goes back to being sold short. If some of
 it was moved, it is refused and the error names what blocks it.
 
-**7. Labour and freight are ours.** Every sauda carries two amounts the
+**7. The WhatsApp messages are the trader's own words.** Two of them: the
+confirmation the party receives, and the firm's own copy with cost and margin
+in it. Both are plain text kept in settings and edited in Setup > Messages,
+with `{tokens}` filled in from the sauda and a live preview. The party's goes
+to their number; the internal one is copied and pasted into whichever group the
+firm uses, because WhatsApp cannot open a group from a link.
+
+**8. Labour and freight are ours.** Every sauda carries two amounts the
 trader types in rupees - labour and freight - and both come straight off what
 it earns, on either side. They are counted on the sauda's own date, so a
 purchase's costs reduce profit the day it is bought; stock stays valued at the
@@ -83,7 +90,7 @@ rate it was bought at, and no lot, allocation or margin moves because of them.
 
     profit = margin of every sale  -  labour and freight of every sauda
 
-**8. Deals can be edited.** Edit on a booked deal opens its ticket filled in.
+**9. Deals can be edited.** Edit on a booked deal opens its ticket filled in.
 Nothing is saved until the review shows every change and every sale whose
 margin moves. The Sauda No. stays; WhatsApp gets a revised confirmation.
 
@@ -232,6 +239,7 @@ backend/
     dashboard.py      summary, attention, counterparties
 web/js/
   lists.js            the one paged list
+  message.js          the two WhatsApp messages and the {tokens} they are written with
   forms.js            the one form engine + every record form and picker
   trade.js / mticket.js   desktop / phone ticket (also edits a booked deal)
   edit.js             review of an edit or a cancel before it is saved

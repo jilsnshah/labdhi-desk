@@ -562,6 +562,8 @@ class SettingsIn(BaseModel):
     sauda_prefix: Optional[str] = None
     alloc_policy: Optional[str] = None
     allow_short_sales: Optional[bool] = None
+    sauda_template: Optional[str] = None       # what the party is sent
+    internal_template: Optional[str] = None    # the firm's own copy
 
 
 @app.post("/api/marks/{product_id}")

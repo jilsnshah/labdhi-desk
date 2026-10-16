@@ -612,3 +612,9 @@ body.phone.trading #toasts { bottom: calc(90px + env(safe-area-inset-bottom, 0px
 .mt-hint.neg, .mflow-empty.neg { color: var(--down); font-weight: 600; }
 .mdeal-meta span.neg { color: var(--down); font-weight: 650; }
 .mflow-card .mark-btn { margin-top: 10px; font-size: 13px; padding: 10px; }
+.msg-view { gap: 14px; }
+.msg-card { padding: 14px; border-radius: 14px; }
+.msg-area { font-size: 12.5px; min-height: 150px; }
+.msg-preview { max-height: 240px; font-size: 12px; }
+.msg-actions .form-save, .msg-actions .form-cancel { flex: 1; text-align: center; }
+.wa-tab { padding: 9px 10px; font-size: 13.5px; }

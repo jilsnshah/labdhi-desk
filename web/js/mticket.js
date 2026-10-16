@@ -900,7 +900,7 @@ async function book() {
                : `Bought ${f.qty(deal.qty_g)} from ${deal.party_name} into ${deal.warehouse}${f.coveredNote(deal)}`,
       { action: async () => { await api.undo(); toast('Reversed'); ctx.refresh(); } });
     ctx.refresh();
-    sendSauda(deal, (ctx.boot && ctx.boot.settings && ctx.boot.settings.company_name), { auto: true });
+    sendSauda(deal, ctx.boot && ctx.boot.settings, { auto: true });
   } catch (err) {
     ms.busy = false; ms.error = err.message; paint();
   }

@@ -175,7 +175,7 @@ export function dealDetail(deal, ctx, reload) {
           if (await cancelWithReview(deal, ctx)) { reload && reload(); ctx.refresh(); }
         }
       }, '✕ Cancel deal') : null,
-      deal.status === 'booked' ? h('button', { class: 'chip wa', onclick: e => { e.stopPropagation(); sendSauda(deal, (ctx.boot && ctx.boot.settings && ctx.boot.settings.company_name)); } },
+      deal.status === 'booked' ? h('button', { class: 'chip wa', onclick: e => { e.stopPropagation(); sendSauda(deal, ctx.boot && ctx.boot.settings); } },
         'Send on WhatsApp') : null,
       h('button', { class: 'chip', onclick: e => { e.stopPropagation(); ctx.openPosition(deal.product_id); } },
         'Open product'),

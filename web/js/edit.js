@@ -41,8 +41,6 @@ export function diffDeal(deal, next, pins) {
   return c;
 }
 
-const company = ctx => (ctx && ctx.boot && ctx.boot.settings && ctx.boot.settings.company_name);
-
 function sheet(title, sub, ...content) {
   let done;
   const result = new Promise(r => { done = r; });
@@ -140,7 +138,7 @@ export async function reviewEdit(deal, changes, ctx) {
       }, p.needs_rehome ? 'Move sales and save' : p.needs_short ? 'Save — sell short' : 'Save changes')));
   if (!saved) return null;
   toast(`${saved.ref} updated`);
-  sendSauda(saved, company(ctx), { revised: true });
+  sendSauda(saved, ctx && ctx.boot && ctx.boot.settings, { revised: true });
   return saved;
 }
 

@@ -4,11 +4,13 @@ import { h, mount, toast, searchBar } from './ui.js';
 import * as f from './fmt.js';
 import { api } from './api.js';
 import { pagedList, counter } from './lists.js';
+import { renderMessages } from './messages-setup.js';
 import { openForm, partyForm, productForm, warehouseForm, markForm } from './forms.js';
 
 export const TABS = [
   ['parties', 'Parties'], ['products', 'Products'], ['warehouses', 'Warehouses'],
-  ['materials', 'Materials & grades'], ['manufacturers', 'Manufacturers'], ['states', 'States']
+  ['materials', 'Materials & grades'], ['manufacturers', 'Manufacturers'], ['states', 'States'],
+  ['messages', 'Messages']
 ];
 
 export function renderSetup(root, ctx) {
@@ -20,7 +22,8 @@ export function renderSetup(root, ctx) {
       onclick: () => { ctx.setupTab = key; ctx.setupFilter = null; renderSetup(root, ctx); }
     }, label))),
     body));
-  SECTIONS[tab](body, ctx, () => renderSetup(root, ctx));
+  if (tab === 'messages') renderMessages(body, ctx);
+  else SECTIONS[tab](body, ctx, () => renderSetup(root, ctx));
 }
 
 // Removing is refused by the server while anything still refers to a record;
