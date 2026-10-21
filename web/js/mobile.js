@@ -12,7 +12,7 @@ import { pagedList } from './lists.js';
 import { SORTS } from './sorts.js';
 import { renderMessages } from './messages-setup.js';
 import { partyForm, productForm, warehouseForm, markForm, transferForm, adjustForm, partySub } from './forms.js';
-import { removeRecord, nameForm } from './setup.js';
+import { removeRecord, nameForm, renderDevice } from './setup.js';
 import { MOVE_LABEL } from './stock.js';
 import { flowExportButton } from './flow.js';
 import { exportButton } from './export.js';
@@ -398,27 +398,28 @@ function dealCard(d, reload) {
 // ==================================================================== setup
 const SETUP_TABS = [['parties', 'Parties'], ['products', 'Products'], ['warehouses', 'Warehouses'],
                     ['materials', 'Materials'], ['manufacturers', 'Makers'], ['states', 'States'],
-                    ['messages', 'Messages']];
+                    ['messages', 'Messages'], ['device', 'Device']];
 
 // The messages editor is one column of cards, so the phone shows the same screen
 // the desktop does, under the tabs it already has.
-function mobileMessages(root, appCtx, again) {
+function mobileOneColumn(root, appCtx, again, which) {
   const tabs = h('div', { class: 'mchips g3 filter', style: { padding: '0 0 10px' } },
     ...SETUP_TABS.map(([key, text]) => h('button', {
-      class: 'mchip' + (key === 'messages' ? ' on' : ''),
+      class: 'mchip' + (key === which ? ' on' : ''),
       onclick: () => { ctx.setupTab = key; ctx.setupFilter = null; again(); }
     }, text)));
   const body = h('div', {});
   mount(root, h('div', { class: 'view' },
     h('div', { class: 'mflow', style: { paddingTop: '14px' } }, tabs, body)));
-  renderMessages(body, appCtx, { phone: true });
+  if (which === 'device') renderDevice(body);
+  else renderMessages(body, appCtx, { phone: true });
 }
 
 export function renderMobileSetup(root, appCtx) {
   ctx = appCtx || ctx;
   const tab = ctx.setupTab || 'parties';
   const again = () => renderMobileSetup(root, ctx);
-  if (tab === 'messages') return mobileMessages(root, ctx, again);
+  if (tab === 'messages' || tab === 'device') return mobileOneColumn(root, ctx, again, tab);
   const cfg = MSETUP[tab];
   let query = '';
   const count = countEl();

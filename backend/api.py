@@ -50,6 +50,19 @@ def health():
     return {"ok": True, "locked": bool(security.token())}
 
 
+@app.post("/api/lock")
+def lock():
+    """Forget this device, so the password is asked for again here.
+
+    For a phone left behind or a borrowed laptop. Other devices keep working -
+    only the cookie on this one is dropped.
+    """
+    from fastapi.responses import JSONResponse as _JSON
+    response = _JSON({"ok": True, "days": security.DEVICE_DAYS})
+    security.forget(response)
+    return response
+
+
 @app.middleware("http")
 async def no_stale_assets(request, call_next):
     """Never let a browser hold on to an old build."""

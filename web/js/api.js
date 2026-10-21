@@ -9,6 +9,7 @@
 const TOKEN_KEY = 'labdhi.token';
 export const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; } };
 export const setToken = t => { try { localStorage.setItem(TOKEN_KEY, t); } catch (_) {} };
+export const clearToken = () => { try { localStorage.removeItem(TOKEN_KEY); } catch (_) {} };
 
 // Same-origin by default; set window.LABDHI_API to point at a separate backend.
 const base = () => (window.LABDHI_API || '').replace(/\/$/, '');
@@ -18,6 +19,16 @@ let askForToken = async () => {
   return v ? v.trim() : '';
 };
 export const setTokenPrompt = fn => { askForToken = fn; };
+
+// A screen fires several calls at once, so a locked desk answers 401 several
+// times at once. Asking once and letting every waiting call share that answer
+// is the difference between one unlock card and six stacked on top of each
+// other - with the password typed into one of them and the rest left hanging.
+let asking = null;
+const askOnce = () => {
+  if (!asking) asking = Promise.resolve(askForToken()).finally(() => { asking = null; });
+  return asking;
+};
 
 // Render's free tier stops the instance after ~15 minutes idle, and the next
 // request pays ~50 seconds to boot it. Any call that takes more than a moment
@@ -57,7 +68,7 @@ async function call(path, opts = {}, attempt = 0) {
   }
   if (res.status === 401) {
     done();
-    const entered = await askForToken();
+    const entered = await askOnce();
     if (entered) { setToken(entered); return call(path, opts); }
     throw new Error('Password required');
   }
@@ -88,7 +99,7 @@ export async function downloadFile(path, params, fallbackName) {
   const res = await fetch(base() + path + (qs(params) ? '?' + qs(params) : ''),
     { headers: token ? { 'X-Labdhi-Token': token } : {} });
   if (res.status === 401) {
-    const entered = await askForToken();
+    const entered = await askOnce();
     if (entered) { setToken(entered); return downloadFile(path, params, fallbackName); }
     throw new Error('Password required');
   }
@@ -172,5 +183,6 @@ export const api = {
   undo: () => post('/api/undo'),
   events: p => get('/api/events', p),
   setMark: (productId, rate_paise) => post(`/api/marks/${productId}`, { rate_paise }),
-  settings: body => post('/api/settings', body)
+  settings: body => post('/api/settings', body),
+  lock: () => post('/api/lock')
 };

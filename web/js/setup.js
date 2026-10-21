@@ -2,7 +2,7 @@
 // paged, added and edited through the same form a ticket's "Add new" opens.
 import { h, mount, toast, searchBar } from './ui.js';
 import * as f from './fmt.js';
-import { api } from './api.js';
+import { api, clearToken } from './api.js';
 import { pagedList, counter } from './lists.js';
 import { renderMessages } from './messages-setup.js';
 import { openForm, partyForm, productForm, warehouseForm, markForm } from './forms.js';
@@ -10,7 +10,7 @@ import { openForm, partyForm, productForm, warehouseForm, markForm } from './for
 export const TABS = [
   ['parties', 'Parties'], ['products', 'Products'], ['warehouses', 'Warehouses'],
   ['materials', 'Materials & grades'], ['manufacturers', 'Manufacturers'], ['states', 'States'],
-  ['messages', 'Messages']
+  ['messages', 'Messages'], ['device', 'This device']
 ];
 
 export function renderSetup(root, ctx) {
@@ -23,8 +23,33 @@ export function renderSetup(root, ctx) {
     }, label))),
     body));
   if (tab === 'messages') renderMessages(body, ctx);
+  else if (tab === 'device') renderDevice(body);
   else SECTIONS[tab](body, ctx, () => renderSetup(root, ctx));
 }
+
+// The password is typed once per device and then remembered - in the browser
+// and, so that it survives a phone clearing its storage, in a signed cookie the
+// server plants. This is where a device is told to forget it again: for a phone
+// left somewhere, or a laptop that is not yours.
+export function renderDevice(root) {
+  const forget = async () => {
+    if (!window.confirm('Ask for the password again on this device?')) return;
+    try {
+      await api.lock();
+      clearToken();
+      location.reload();
+    } catch (err) { toast(err.message, { kind: 'err', ms: 8000 }); }
+  };
+  mount(root, h('div', { class: 'msg-card' },
+    h('div', { class: 'section-head' }, h('h2', {}, 'This device'), h('i', { class: 'rule' })),
+    h('div', { class: 'msg-why' },
+      'The password was typed here once and is remembered for six months, so the '
+      + 'book opens straight away. It is remembered on this device only - every '
+      + 'other phone and laptop asks on its own.'),
+    h('div', { class: 'msg-actions' },
+      h('button', { class: 'form-cancel', onclick: forget }, 'Ask for the password again here'))));
+}
+
 
 // Removing is refused by the server while anything still refers to a record;
 // the reason comes back and is shown as it is.
