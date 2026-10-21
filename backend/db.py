@@ -15,6 +15,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
@@ -117,11 +118,13 @@ class Conn:
     def __init__(self, raw, is_pg: bool):
         self.raw = raw
         self.is_pg = is_pg
+        self.used = time.monotonic()        # when the server last answered
 
     def execute(self, sql: str, args: Iterable = ()):
         if self.is_pg:
             cur = self.raw.cursor()
             cur.execute(to_pg(sql), tuple(args))
+            self.used = time.monotonic()
             return cur
         return self.raw.execute(sql, tuple(args))
 
@@ -130,6 +133,7 @@ class Conn:
         if self.is_pg:
             cur = self.raw.cursor()
             cur.execute(to_pg(sql) + " RETURNING id", tuple(args))
+            self.used = time.monotonic()
             row = cur.fetchone()
             return int(row["id"] if isinstance(row, dict) else row[0])
         return int(self.raw.execute(sql, tuple(args)).lastrowid)
@@ -140,14 +144,70 @@ class Conn:
             self.execute(stmt)
 
 
-def connect() -> Conn:
+# ------------------------------------------------------------------ liveness
+# A desk sleeps between trades, and a hosted one sleeps hard: Cloud Run freezes
+# the container the moment a request is answered, and Neon closes a client that
+# has gone quiet - then suspends its compute altogether. The Postgres socket is
+# therefore usually dead by the time the next sauda is booked, and nothing has
+# told this process. psycopg only finds out when a query fails, which used to
+# surface as a 500 on a perfectly good request.
+#
+# So the cached handle is treated as provisional: proved before it is handed
+# out after a quiet spell, and replaced rather than raised through.
+IDLE_PROVE = 20.0       # seconds of quiet after which a handle must prove itself
+
+
+def _lost(exc: BaseException) -> bool:
+    """Did the connection die, as against the query being wrong?"""
+    if not IS_PG:
+        return False
+    import psycopg
+    return isinstance(exc, (psycopg.OperationalError, psycopg.InterfaceError))
+
+
+def _alive(conn: Conn, prove: bool = False) -> bool:
+    raw = conn.raw
+    if raw.closed or getattr(raw, "broken", False):
+        return False
+    if not prove and time.monotonic() - conn.used < IDLE_PROVE:
+        return True                         # it answered a moment ago
+    try:
+        raw.cursor().execute("SELECT 1")
+    except Exception:
+        return False
+    conn.used = time.monotonic()
+    return True
+
+
+def _drop() -> None:
+    """Throw this thread's handle away. The next connect() opens a fresh one."""
     conn = getattr(_local, "conn", None)
     if conn is not None:
-        return conn
+        try:
+            conn.raw.close()
+        except Exception:
+            pass
+    _local.__dict__.pop("conn", None)
+
+
+def connect(prove: bool = False) -> Conn:
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        if not conn.is_pg or _alive(conn, prove):
+            return conn
+        _drop()
 
     if IS_PG:
         import psycopg
-        raw = psycopg.connect(DATABASE_URL, autocommit=True, row_factory=_int_rows)
+        raw = psycopg.connect(
+            DATABASE_URL, autocommit=True, row_factory=_int_rows,
+            # Fail fast rather than hang a request for the platform's timeout.
+            connect_timeout=10,
+            # Keepalives notice a socket the far end has dropped. On a host
+            # that freezes the CPU between requests they cannot fire, which is
+            # why the check above exists as well.
+            keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3,
+        )
     else:
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         raw = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
@@ -255,7 +315,9 @@ def tx():
 
     Nested use joins the outer transaction instead of committing half of it.
     """
-    conn = connect()
+    # A write cannot be replayed once it has begun, so the handle is proved
+    # first. One extra round trip, on the rare request that changes the book.
+    conn = connect(prove=not getattr(_local, "depth", 0))
     if getattr(_local, "depth", 0):
         _local.depth += 1
         try:
@@ -281,12 +343,28 @@ def tx():
 
 
 # ------------------------------------------------------------------ helpers
+def _read(run):
+    """Run a read, once more on a fresh connection if the old one had died.
+
+    Only outside a transaction: inside one, the statements already run would be
+    silently lost on a retry, so the error goes up and the whole unit of work
+    rolls back.
+    """
+    try:
+        return run(connect())
+    except Exception as exc:
+        if getattr(_local, "depth", 0) or not _lost(exc):
+            raise
+        _drop()
+        return run(connect())
+
+
 def q(sql: str, args: Iterable = ()) -> List[Any]:
-    return connect().execute(sql, args).fetchall()
+    return _read(lambda c: c.execute(sql, args).fetchall())
 
 
 def q1(sql: str, args: Iterable = ()) -> Optional[Any]:
-    return connect().execute(sql, args).fetchone()
+    return _read(lambda c: c.execute(sql, args).fetchone())
 
 
 def scalar(sql: str, args: Iterable = (), default=0):
