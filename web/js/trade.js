@@ -59,11 +59,12 @@ export function startTrade(side, opts = {}, appCtx = {}) {
     plus_gst: true, payment_due: '', ex_place: '',
     rateInvalid: false, rateText: '',
     date: f.today(),
-    edit: opts.edit || null           // a booked deal being changed
+    edit: opts.edit || null,          // a booked deal being changed
+    from: opts.duplicate || null      // the same deal again: everything copied but the number
   };
   loadParties();
   loadLevels();
-  if (state.edit) { prefill(state.edit); return; }
+  if (state.edit || state.from) { prefill(state.edit || state.from, !state.edit); return; }
   refreshSauda(true);
   if (opts.product && opts.product.id) chooseProduct(opts.product.id);
 }
@@ -71,12 +72,15 @@ export function startTrade(side, opts = {}, appCtx = {}) {
 // Editing: the ticket opens with the deal as booked. On a sale, the lots it
 // draws on count as free (it gives them back when re-split) and start at the
 // amounts it holds, so an untouched split saves as it was.
-async function prefill(d) {
+// Used twice: editing a booked sauda, and doing the same one again. A copy is a
+// new sauda - today's date, the next number, and its own stock to come out of -
+// so only what the trader would retype is carried over.
+async function prefill(d, copy = false) {
   const my = state;
   Object.assign(state, {
     party: { id: d.party_id, name: d.party_name, gstin: d.party_gstin },
-    rate_paise: d.rate_paise, plus_gst: !!d.plus_gst, date: d.deal_date,
-    sauda_no: d.ref, saudaAuto: false,
+    rate_paise: d.rate_paise, plus_gst: !!d.plus_gst, date: copy ? f.today() : d.deal_date,
+    sauda_no: copy ? '' : d.ref, saudaAuto: !!copy,
     payment_due: d.payment_due || '', ex_place: d.ex_place || '',
     labour_paise: d.labour_paise || 0, freight_paise: d.freight_paise || 0,
     labour_rate: Math.round(COSTS.labour.of(d.labour_paise || 0, d.qty_g)),
@@ -90,10 +94,14 @@ async function prefill(d) {
   await chooseWarehouse({ id: d.warehouse_id, name: d.warehouse });
   if (state !== my) return;
   state.qty_g = d.qty_g;
+  recostTotals();
   if (d.side === 'sell') {
     resetAlloc();
-    for (const a of d.allocations || []) state.alloc[a.lot_id] = (state.alloc[a.lot_id] || 0) + a.qty_g;
+    // a copy takes its own stock, oldest first; the original's lots may be gone
+    if (copy) fillOldestFirst();
+    else for (const a of d.allocations || []) state.alloc[a.lot_id] = (state.alloc[a.lot_id] || 0) + a.qty_g;
   }
+  if (copy) refreshSauda(true);
   render();
 }
 
@@ -261,6 +269,16 @@ function typeAmount(lot, raw) {
   sync();
 }
 
+// Spread what is being sold across the lots as they come, oldest first.
+function fillOldestFirst() {
+  let left = state.qty_g;
+  for (const lot of state.lots) {
+    const take = Math.max(0, Math.min(lot.available_g, left));
+    state.alloc[lot.id] = take;
+    left -= take;
+  }
+}
+
 function fillRest(lot) {
   delete state.allocText[lot.id];
   setAmount(lot, (state.alloc[lot.id] || 0) + Math.max(0, flow().left));
@@ -294,6 +312,7 @@ function render() {
         h('div', { class: 'trade-kind' }, state.edit ? `EDIT ${state.edit.ref}` : (sell ? 'SELL' : 'BUY')),
         h('div', { class: 'trade-sub' }, state.edit
           ? `${sell ? 'sale' : 'purchase'} · nothing is saved until you review the changes`
+          : state.from ? `same as ${state.from.ref} · a new sauda, change what differs`
           : (sell ? 'stock out of one warehouse · margin booked' : 'stock into one warehouse')),
         h('button', { class: 'trade-back', onclick: () => ctx.go(state.edit ? 'tape' : 'desk') }, 'Cancel')),
       blockSauda(),

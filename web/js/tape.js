@@ -169,6 +169,10 @@ export function dealDetail(deal, ctx, reload) {
       deal.status === 'booked' ? h('button', {
         class: 'chip on', onclick: e => { e.stopPropagation(); ctx.editDeal(deal); }
       }, '✎ Edit') : null,
+      h('button', {
+        class: 'chip', title: 'The same sauda again, with a new number',
+        onclick: e => { e.stopPropagation(); ctx.duplicateDeal(deal); }
+      }, '⧉ Duplicate'),
       deal.status === 'booked' ? h('button', {
         class: 'chip', onclick: async e => {
           e.stopPropagation();
@@ -188,15 +192,18 @@ export function dealDetail(deal, ctx, reload) {
 }
 
 // ---------------------------------------------------------------- position
-export async function renderPosition(root, productId, ctx) {
+export async function renderPosition(root, productId, ctx, { all = false } = {}) {
   const p = await api.position(productId);
   const open = p.lots.filter(l => l.available_g > 0);
+  // what he came to see is what he still holds; the sold ones are history, a tap away
+  const shown = all ? p.lots : open;
+  const soldOut = p.lots.length - open.length;
   const pos = {
     lots: open,
     cost_low_paise: Math.min(...p.lots.map(l => l.rate_paise)),
     cost_high_paise: Math.max(...p.lots.map(l => l.rate_paise))
   };
-  const again = () => { ctx.refresh(); renderPosition(root, productId, ctx); };
+  const again = () => { ctx.refresh(); renderPosition(root, productId, ctx, { all }); };
 
   mount(root, h('div', { class: 'view' },
     h('div', { class: 'chips', style: { marginBottom: '14px' } },
@@ -233,8 +240,14 @@ export async function renderPosition(root, productId, ctx) {
           `est. ${f.inr(Math.round(s.uncovered_g * (s.rate_paise - p.mark_paise) / 1000), { sign: true })} at mark`) : null))) : null,
 
     h('div', { class: 'section-head', style: { marginTop: '22px' } },
-      h('h2', {}, 'Every lot, where it sits, and where it went'), h('i', { class: 'rule' })),
-    h('div', { class: 'tape' }, ...p.lots.map(l => lotRow({ ...l, product: p.product.display }, pos, again)))));
+      h('h2', {}, all ? 'Every lot, where it sits, and where it went' : 'What is still here'),
+      h('i', { class: 'rule' }),
+      soldOut ? h('button', {
+        class: 'chip' + (all ? ' on' : ''),
+        onclick: () => renderPosition(root, productId, ctx, { all: !all })
+      }, all ? `Hide ${soldOut} sold out` : `Show ${soldOut} sold out`) : null),
+    h('div', { class: 'tape' }, ...shown.map(l => lotRow({ ...l, product: p.product.display }, pos, again))),
+    !shown.length ? h('div', { class: 'dim' }, 'No lots of this product are still open.') : null));
 }
 
 function stat(label, value, sub, tone, onclick) {

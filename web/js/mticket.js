@@ -47,14 +47,15 @@ export function startTicket(side, opts = {}, appCtx) {
     sauda_no: '', saudaAuto: true,
     plus_gst: true, payment_due: '', ex_place: '',
     date: f.today(), busy: false, error: '', stepIndex: 0,
-    edit: opts.edit || null           // a booked deal being changed
+    edit: opts.edit || null,          // a booked deal being changed
+    from: opts.duplicate || null      // the same deal again: everything copied but the number
   };
   document.body.classList.add('trading');
   screen = h('div', { class: 'mtrade ' + side });
   document.body.appendChild(screen);
   history.pushState({ ticket: true }, '');
   window.addEventListener('popstate', onPop);
-  if (ms.edit) { prefill(ms.edit); paint(); return; }
+  if (ms.edit || ms.from) { prefill(ms.edit || ms.from, !ms.edit); paint(); return; }
   refreshSauda(true);
   if (opts.product && opts.product.id) chooseProduct(opts.product.id, 2);
   loadStep();
@@ -63,12 +64,15 @@ export function startTicket(side, opts = {}, appCtx) {
 
 // Editing opens on the review screen with the deal as booked; each row there
 // jumps to its step. A sale's own lots count as free and start at what it holds.
-async function prefill(d) {
+// Used twice: editing a booked sauda, and doing the same one again. A copy is a
+// new sauda - today's date, the next number, its own stock - so only what the
+// trader would otherwise retype is carried across.
+async function prefill(d, copy = false) {
   const my = ms;
   Object.assign(ms, {
     party: { id: d.party_id, name: d.party_name, gstin: d.party_gstin },
-    rate_paise: d.rate_paise, plus_gst: !!d.plus_gst, date: d.deal_date,
-    sauda_no: d.ref, saudaAuto: false,
+    rate_paise: d.rate_paise, plus_gst: !!d.plus_gst, date: copy ? f.today() : d.deal_date,
+    sauda_no: copy ? '' : d.ref, saudaAuto: !!copy,
     payment_due: d.payment_due || '', ex_place: d.ex_place || '',
     labour_paise: d.labour_paise || 0, freight_paise: d.freight_paise || 0,
     labour_rate: d.qty_g ? Math.round((d.labour_paise || 0) * MT / d.qty_g) : 0,
@@ -83,13 +87,18 @@ async function prefill(d) {
   ms.product = { ...pos.product, stock_g: pos.stock_g };
   ms.warehouse = { id: d.warehouse_id, name: d.warehouse };
   if (d.side === 'sell') {
-    const r = await api.lots(d.product_id, d.warehouse_id, d.id).catch(() => ({ items: [] }));
+    const r = await api.lots(d.product_id, d.warehouse_id, copy ? undefined : d.id).catch(() => ({ items: [] }));
     if (ms !== my) return;
     ms.lots = r.items.slice().sort((a, b) => a.rate_paise - b.rate_paise);
     ms.alloc = {};
-    for (const a of d.allocations || []) ms.alloc[a.lot_id] = (ms.alloc[a.lot_id] || 0) + a.qty_g;
+    if (!copy) for (const a of d.allocations || []) ms.alloc[a.lot_id] = (ms.alloc[a.lot_id] || 0) + a.qty_g;
   }
   ms.qty_g = d.qty_g;
+  recostTotals();
+  if (copy) {
+    autoAssign();                       // its own stock, oldest first
+    refreshSauda(true);
+  }
   ms.stepIndex = steps().indexOf('review');
   paint();
 }
@@ -304,7 +313,8 @@ function paint() {
     h('div', { class: 'mt-head' },
       h('button', { class: 'mt-back', onclick: back }, '‹'),
       h('div', { class: 'mt-title' },
-        h('b', { class: 'mt-kind' }, ms.edit ? `Edit ${ms.edit.ref}` : (ms.side === 'sell' ? 'Sell' : 'Buy')),
+        h('b', { class: 'mt-kind' }, ms.edit ? `Edit ${ms.edit.ref}`
+          : ms.from ? `Same as ${ms.from.ref}` : (ms.side === 'sell' ? 'Sell' : 'Buy')),
         h('span', {}, crumbs())),
       h('button', { class: 'mt-back', onclick: () => closeTicket() }, '✕')),
     h('div', { class: 'mt-steps' }, ...steps().map((_, i) => h('i', { class: i <= stepIndex() ? 'done' : '' }))),
@@ -627,7 +637,8 @@ function stepReview() {
   return [
     h('div', { class: 'mt-q' }, ms.edit ? 'Change what you need' : (sell ? 'Confirm the sale' : 'Confirm the purchase')),
     h('div', { class: 'mt-hint' }, ms.edit ? 'Tap a row to change it. You see every change before it is saved.'
-                                          : 'One tap to book. You can undo straight after.'),
+      : ms.from ? `Copied from ${ms.from.ref}. Change what differs, then book it.`
+      : 'One tap to book. You can undo straight after.'),
     h('div', { class: 'mrev' },
       row('Sauda No.', ms.sauda_no || '—', ms.edit ? null : editSauda),
       row(sell ? 'Buyer' : 'Supplier', ms.party.name, () => jump('who')),

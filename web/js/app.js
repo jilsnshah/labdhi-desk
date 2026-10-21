@@ -96,6 +96,8 @@ function sell(pos) {
 ctx.trade = trade;
 // open the ticket on a booked deal, every field filled in, to change it
 ctx.editDeal = deal => trade(deal.side, { edit: deal });
+// the same sauda again: everything copied, a new number, nothing booked yet
+ctx.duplicateDeal = deal => trade(deal.side, { duplicate: deal });
 
 // ---------------------------------------------------------------- keyboard
 window.addEventListener('keydown', e => {

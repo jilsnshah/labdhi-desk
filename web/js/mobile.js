@@ -220,7 +220,12 @@ export async function renderMobilePosition(root, productId, appCtx) {
   ctx = appCtx || ctx;
   const p = await api.position(productId);
   const open = p.lots.filter(l => l.available_g > 0);
-  const after = () => { ctx.refresh(); renderMobilePosition(root, productId, ctx); };
+  // the lots he still holds are the point; sold-out ones are history, one tap away
+  const st = ctx.mposition || (ctx.mposition = { allLots: false });
+  const shown = st.allLots ? p.lots : open;
+  const soldOut = p.lots.length - open.length;
+  const again = () => renderMobilePosition(root, productId, ctx);
+  const after = () => { ctx.refresh(); again(); };
   mount(root, h('div', { class: 'view' },
     h('div', { class: 'mflow', style: { paddingTop: '14px' } },
       h('button', { class: 'mmore', style: { marginBottom: '12px' }, onclick: () => ctx.go('desk') }, '‹ Back to desk'),
@@ -241,8 +246,13 @@ export async function renderMobilePosition(root, productId, appCtx) {
           h('div', { class: 'grow' }, h('b', {}, s.party_name), h('span', {}, `${s.ref} · ${s.warehouse} · sold @ ${f.rate(s.rate_paise)}`)),
           h('div', { class: 'mflow-money' }, h('b', { class: 'num neg' }, `−${f.qty(s.uncovered_g)}`),
             h('span', {}, p.mark_paise ? `est. ${f.inr(Math.round(s.uncovered_g * (s.rate_paise - p.mark_paise) / 1000), { sign: true })}` : 'owed')))))) : null,
-    h('div', { class: 'mflow' }, label('Lots', h('span', {}, `${open.length} open`)),
-      ...p.lots.map(l => {
+    h('div', { class: 'mflow' },
+      label(st.allLots ? 'Lots' : 'What is still here',
+        h('span', {}, `${open.length} open`)),
+      soldOut ? h('button', { class: 'mmore', style: { marginBottom: '10px' },
+        onclick: () => { st.allLots = !st.allLots; again(); } },
+        st.allLots ? `Hide ${soldOut} sold out` : `Show ${soldOut} sold out`) : null,
+      ...shown.map(l => {
         const card = lotCard({ ...l, product: p.product.display }, after);
         if (l.outflows && l.outflows.length) {
           card.appendChild(h('div', { class: 'mflow-links' }, ...l.outflows.map(o => h('div', { class: 'mflow-link' },
@@ -358,6 +368,8 @@ function dealCard(d, reload) {
       full.status === 'booked' ? h('button', {
         class: 'mmore', style: { marginTop: '10px' }, onclick: () => ctx.editDeal(full)
       }, 'Edit this deal') : null,
+      h('button', { class: 'mmore', style: { marginTop: '10px' }, onclick: () => ctx.duplicateDeal(full) },
+        'Do this sauda again'),
       full.status === 'booked' ? h('button', {
         class: 'mmore', style: { marginTop: '10px' },
         onclick: async () => { if (await cancelWithReview(full, ctx)) { reload(); ctx.refresh(); } }
