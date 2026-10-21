@@ -111,8 +111,19 @@ def _pos_filters(q=None, include_flat=False, material_id=None, grade_id=None,
     return where, args
 
 
+# The desk's own orders. Same rule: a name off this list, or nothing.
+POSITION_SORTS = {
+    "stock": "COALESCE(st.stock_g, 0) - COALESCE(sh.short_g, 0) DESC",
+    "stock_low": "COALESCE(st.stock_g, 0) - COALESCE(sh.short_g, 0) ASC",
+    "product": "s.display ASC",
+    "lots": "COALESCE(st.open_lots, 0) DESC",
+    "mark": "(m.rate_paise IS NULL), m.rate_paise DESC",
+}
+
+
 def positions(include_flat: bool = False, q: Optional[str] = None, limit: Optional[int] = None,
-              offset: int = 0, warehouse_id: Optional[int] = None, **filters) -> Dict[str, Any]:
+              offset: int = 0, warehouse_id: Optional[int] = None, sort: Optional[str] = None,
+              **filters) -> Dict[str, Any]:
     limit, offset = db.page_args(limit, offset, default=12)
     where, args = _pos_filters(q, include_flat, warehouse_id=warehouse_id, **filters)
     join_args = [int(warehouse_id)] * 2 if warehouse_id else []
@@ -125,7 +136,7 @@ def positions(include_flat: bool = False, q: Optional[str] = None, limit: Option
                   COALESCE(st.stock_g, 0) - COALESCE(sh.short_g, 0) AS stock_g,
                   COALESCE(sh.short_g, 0) AS short_g, COALESCE(st.open_lots, 0) AS open_lots,
                   m.rate_paise AS mark_paise, m.source AS mark_source""" + base +
-        " ORDER BY COALESCE(st.stock_g, 0) - COALESCE(sh.short_g, 0) DESC, s.display LIMIT ? OFFSET ?",
+        " ORDER BY %s, s.display LIMIT ? OFFSET ?" % POSITION_SORTS.get(sort or "stock", POSITION_SORTS["stock"]),
         join_args + args + [limit, offset])
 
     out = []

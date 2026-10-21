@@ -515,8 +515,26 @@ def _deal_filters(side=None, status=None, product_id=None, party_id=None, wareho
     return where, args
 
 
-def list_deals(limit: Optional[int] = None, offset: int = 0, **filters) -> Dict[str, Any]:
-    """The book as one chronological stream, one filtered page at a time."""
+# How the tape can be ordered. Anything not on this list is ignored, so an
+# order can never reach into the query itself.
+DEAL_SORTS = {
+    "newest": "d.deal_date DESC, d.id DESC",
+    "oldest": "d.deal_date ASC, d.id ASC",
+    "value": "d.qty_g * d.rate_paise DESC",
+    "value_low": "d.qty_g * d.rate_paise ASC",
+    "qty": "d.qty_g DESC",
+    "rate": "d.rate_paise DESC",
+    "margin": "margin_gp DESC",
+    "margin_low": "margin_gp ASC",
+    "party": "p.name ASC, d.deal_date DESC",
+    "product": "s.display ASC, d.deal_date DESC",
+    "due": "(d.payment_due IS NULL), d.payment_due ASC",
+}
+
+
+def list_deals(limit: Optional[int] = None, offset: int = 0, sort: Optional[str] = None,
+               **filters) -> Dict[str, Any]:
+    """The book as one stream, one filtered page at a time - newest first unless asked otherwise."""
     limit, offset = db.page_args(limit, offset, default=30)
     where, args = _deal_filters(**filters)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
@@ -524,8 +542,8 @@ def list_deals(limit: Optional[int] = None, offset: int = 0, **filters) -> Dict[
         "SELECT COUNT(*) FROM deals d JOIN parties p ON p.id=d.party_id "
         "JOIN v_products s ON s.id=d.product_id LEFT JOIN warehouses w ON w.id=d.warehouse_id "
         "LEFT JOIN parties t ON t.id=d.transporter_id" + clause, args)
-    rows = db.q(DEAL_SELECT + clause + " ORDER BY d.deal_date DESC, d.id DESC LIMIT ? OFFSET ?",
-                args + [limit, offset])
+    order = DEAL_SORTS.get(sort or "newest", DEAL_SORTS["newest"])
+    rows = db.q(DEAL_SELECT + clause + " ORDER BY %s LIMIT ? OFFSET ?" % order, args + [limit, offset])
     return db.page([_dress(r) for r in rows], total, limit, offset)
 
 

@@ -9,7 +9,12 @@ import { h, mount } from './ui.js';
 export function makeFilters({ fields, onChange }) {
   const state = {};
   const options = {};
-  for (const fld of fields) state[fld.key] = fld.value || '';
+  for (const fld of fields) {
+    state[fld.key] = fld.value || '';
+    // a field whose choices are known up front (sorting) brings them with it;
+    // the rest are filled in later from the records they stand for
+    if (fld.options) options[fld.key] = fld.options;
+  }
 
   const el = h('div', { class: 'filterbar' });
   // On a phone the controls start folded: you open a list to see the list, not

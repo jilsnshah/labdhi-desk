@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from datetime import datetime, timedelta
+
 from .. import db
 from ..money import fmt_qty
 
@@ -30,6 +32,12 @@ def refresh_lot_status(conn) -> None:
                  "WHERE status='open' AND qty_allocated_g + qty_out_g >= qty_g")
     conn.execute("UPDATE lots SET status='open' "
                  "WHERE status='exhausted' AND qty_allocated_g + qty_out_g < qty_g")
+
+
+def _days_since(day: Optional[str]) -> Optional[int]:
+    if not day:
+        return None
+    return (datetime.now().date() - datetime.strptime(day[:10], "%Y-%m-%d").date()).days
 
 
 def _paise(gram_paise) -> int:
@@ -87,20 +95,42 @@ _STOCK_SEARCH = ("(LOWER(s.display) LIKE ? OR LOWER(s.material) LIKE ? OR LOWER(
 # is sold short there shown as negative stock. Never both (see shorts.py).
 _CELLS = """
     SELECT l.product_id, l.warehouse_id, {a} AS free_g, 0 AS short_g, 1 AS lots,
-           {a} * l.rate_paise AS cost_gp, l.rate_paise AS lo, l.rate_paise AS hi
-    FROM lots l WHERE l.status = 'open' AND {a} > 0
+           {a} * l.rate_paise AS cost_gp, l.rate_paise AS lo, l.rate_paise AS hi,
+           bd.deal_date AS bought_on
+    FROM lots l JOIN deals bd ON bd.id = l.deal_id
+    WHERE l.status = 'open' AND {a} > 0
     UNION ALL
-    SELECT d.product_id, d.warehouse_id, 0, d.uncovered_g, 0, 0, CAST(NULL AS BIGINT), CAST(NULL AS BIGINT)
+    SELECT d.product_id, d.warehouse_id, 0, d.uncovered_g, 0, 0, CAST(NULL AS BIGINT), CAST(NULL AS BIGINT),
+           CAST(NULL AS TEXT)
     FROM deals d WHERE d.side = 'sell' AND d.status = 'booked' AND d.uncovered_g > 0
 """.format(a=AVAILABLE)
+
+# How a trader asks to see his stock. Anything not on this list is ignored, so
+# a sort can never reach into the query itself.
+STOCK_SORTS = {
+    "stock": "stock_g DESC",
+    "stock_low": "stock_g ASC",
+    "value": "cost_gp DESC",
+    "cost": "cost_low_paise DESC",
+    "cost_low": "cost_low_paise ASC",
+    "oldest": "bought_on ASC",
+    "newest": "bought_on DESC",
+    "idle": "idle_g DESC, bought_on ASC",
+    "product": "product ASC",
+    "warehouse": "warehouse ASC, product ASC",
+}
 
 
 def stock_rows(q: str = "", product_id: Optional[int] = None, warehouse_id: Optional[int] = None,
                material_id: Optional[int] = None, grade_id: Optional[int] = None,
-               manufacturer_id: Optional[int] = None, limit: Optional[int] = None,
-               offset: int = 0) -> Dict[str, Any]:
-    """One row per product per warehouse that holds any of it, or is sold short there."""
+               manufacturer_id: Optional[int] = None, idle: bool = False, sort: Optional[str] = None,
+               limit: Optional[int] = None, offset: int = 0) -> Dict[str, Any]:
+    """One row per product per warehouse that holds any of it, or is sold short there.
+
+    `idle` keeps only the cells holding stock bought more than a month ago -
+    what the desk's "idle for over 30 days" line is counting."""
     limit, offset = db.page_args(limit, offset)
+    stale_before = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
     where, args = [], []
     like = db.like(q)
     if like:
@@ -112,21 +142,29 @@ def stock_rows(q: str = "", product_id: Optional[int] = None, warehouse_id: Opti
             where.append("%s = ?" % col); args.append(int(val))
     base = """FROM (%s) c JOIN v_products s ON s.id = c.product_id
               JOIN warehouses w ON w.id = c.warehouse_id
-              %s""" % (_CELLS, ("WHERE " + " AND ".join(where)) if where else "")
-    total = db.scalar("SELECT COUNT(*) FROM (SELECT c.product_id, c.warehouse_id %s "
-                      "GROUP BY c.product_id, c.warehouse_id) x" % base, args)
+              %s""" % (_CELLS.replace("{stale}", "?"), ("WHERE " + " AND ".join(where)) if where else "")
+    total = db.scalar(
+        """SELECT COUNT(*) FROM (
+             SELECT c.product_id, c.warehouse_id,
+                    SUM(CASE WHEN c.bought_on <= ? THEN c.free_g ELSE 0 END) AS idle_g
+             %s GROUP BY c.product_id, c.warehouse_id) x %s"""
+        % (base, "WHERE idle_g > 0" if idle else ""), [stale_before] + args)
     rows = db.q(
         """SELECT * FROM (
              SELECT c.product_id, c.warehouse_id, s.display AS product, s.material, s.grade,
                     s.manufacturer, w.name AS warehouse,
                     SUM(c.free_g) - SUM(c.short_g) AS stock_g, SUM(c.short_g) AS short_g,
                     SUM(c.lots) AS lots, SUM(c.cost_gp) AS cost_gp,
-                    MIN(c.lo) AS cost_low_paise, MAX(c.hi) AS cost_high_paise
+                    MIN(c.lo) AS cost_low_paise, MAX(c.hi) AS cost_high_paise,
+                    MIN(c.bought_on) AS bought_on,
+                    SUM(CASE WHEN c.bought_on <= ? THEN c.free_g ELSE 0 END) AS idle_g
              {base}
              GROUP BY c.product_id, c.warehouse_id, s.display, s.material, s.grade,
                       s.manufacturer, w.name
-           ) x ORDER BY stock_g DESC, product, warehouse LIMIT ? OFFSET ?""".format(base=base),
-        args + [limit, offset])
+           ) x {idle} ORDER BY {order}, product, warehouse LIMIT ? OFFSET ?""".format(
+            base=base, idle="WHERE idle_g > 0" if idle else "",
+            order=STOCK_SORTS.get(sort or "stock", STOCK_SORTS["stock"])),
+        [stale_before] + args + [limit, offset])
     marks = {}
     items = []
     for r in rows:
@@ -141,6 +179,8 @@ def stock_rows(q: str = "", product_id: Optional[int] = None, warehouse_id: Opti
             m = db.q1("SELECT rate_paise FROM marks WHERE product_id=?", (row["product_id"],))
             marks[row["product_id"]] = m["rate_paise"] if m else None
         row["mark_paise"] = marks[row["product_id"]]
+        row["idle_g"] = int(row["idle_g"] or 0)
+        row["age_days"] = _days_since(row["bought_on"])
         items.append(row)
     return db.page(items, total, limit, offset)
 

@@ -9,6 +9,7 @@ import { h, mount, svg, toast, debounce } from './ui.js';
 import * as f from './fmt.js';
 import { api } from './api.js';
 import { pagedList } from './lists.js';
+import { SORTS } from './sorts.js';
 import { renderMessages } from './messages-setup.js';
 import { partyForm, productForm, warehouseForm, markForm, transferForm, adjustForm, partySub } from './forms.js';
 import { removeRecord, nameForm } from './setup.js';
@@ -89,9 +90,10 @@ export function renderMobileDesk(root, s, appCtx) {
   ctx = appCtx || ctx;
   paintHeader(s);
   const count = countEl();
+  const st = ctx.mdesk || (ctx.mdesk = { sort: 'stock' });
   const list = pagedList({
     pageSize: 15,
-    load: p => api.positions(p),
+    load: p => api.positions({ ...p, sort: st.sort }),
     onPage: count.update,
     row: p => h('div', { class: 'mpos' },
       h('div', { class: 'mpos-main', onclick: () => ctx.go('position', p.product_id) },
@@ -108,17 +110,24 @@ export function renderMobileDesk(root, s, appCtx) {
   mount(root, h('div', { class: 'view' },
     s.attention && s.attention.length
       ? h('div', { class: 'mflow', style: { paddingTop: '14px' } },
-          ...s.attention.slice(0, 3).map(a => h('div', { class: 'alert ' + a.level, onclick: () => a.route && ctx.go(a.route) },
+          ...s.attention.slice(0, 3).map(a => h('div', { class: 'alert ' + a.level, onclick: () => {
+            if (a.kind === 'stale') ctx.stockIdle = true;      // open Stock on exactly those rows
+            return a.route && ctx.go(a.route);
+          } },
             h('i', { class: 'bar' }), h('div', {}, h('b', {}, a.title), h('div', {}, h('span', {}, a.detail))))))
       : null,
-    h('div', { class: 'mdesk' }, label('Positions', count), list.el)));
+    h('div', { class: 'mdesk' }, label('Positions', count),
+      h('div', { class: 'msort-row', style: { marginBottom: '10px' } },
+        msort('positions', st.sort, v => { st.sort = v; list.reload({}); })),
+      list.el)));
   list.reload({});
 }
 
 // ==================================================================== stock
 export async function renderMobileStock(root, appCtx) {
   ctx = appCtx || ctx;
-  const st = ctx.mstock || (ctx.mstock = { warehouse_id: '', q: '', detail: null });
+  const st = ctx.mstock || (ctx.mstock = { warehouse_id: '', q: '', detail: null, sort: 'stock', idle: '' });
+  if (ctx.stockIdle) { st.idle = '1'; st.sort = 'idle'; ctx.stockIdle = false; }   // from the desk's idle line
   if (st.detail) return stockItem(root, st);
 
   const whs = await api.warehouses({ limit: 50 });
@@ -129,12 +138,13 @@ export async function renderMobileStock(root, appCtx) {
       h('div', { class: 'mflow-head' },
         h('div', { class: 'grow' }, h('b', {}, `${r.material} ${r.grade} · ${r.manufacturer}`),
           h('span', {}, r.lots ? `${r.warehouse} · ${r.lots} lot${r.lots === 1 ? '' : 's'} · cost ${f.rate(r.cost_paise)}`
+                                 + (r.idle_g ? ` · ${f.qty(r.idle_g)} idle ${r.age_days}d` : '')
                                : `${r.warehouse} · sold short, waiting for stock`)),
         h('div', { class: 'mflow-money' }, h('b', { class: 'num' + f.neg(r.stock_g) }, r.short_g ? `${f.qty(r.stock_g)} short` : f.qty(r.stock_g)),
           h('span', {}, r.lots ? f.inr(r.stock_value_paise, { compact: true }) : '')))),
     empty: () => h('div', { class: 'empty' }, h('h3', {}, 'Nothing in stock here'))
   });
-  const reload = () => list.reload({ q: st.q, warehouse_id: st.warehouse_id });
+  const reload = () => list.reload({ q: st.q, warehouse_id: st.warehouse_id, sort: st.sort, idle: st.idle || undefined });
 
   mount(root, h('div', { class: 'view' },
     h('div', { class: 'mflow', style: { paddingTop: '14px' } },
@@ -147,8 +157,12 @@ export async function renderMobileStock(root, appCtx) {
         }, h('b', {}, w.name), h('span', { class: f.neg(w.stock_g) }, f.qty(w.stock_g)))),
         h('button', { class: 'mwh add', onclick: async () => { if (await warehouseForm()) renderMobileStock(root, ctx); } },
           h('b', {}, '+'), h('span', {}, 'warehouse'))),
-      msearch('Product, grade or maker', q => { st.q = q; reload(); }, st.q)),
-    h('div', { class: 'mflow' }, label('Stock by warehouse', count), list.el)));
+      msearch('Product, grade or maker', q => { st.q = q; reload(); }, st.q),
+      h('div', { class: 'msort-row' },
+        msort('stock', st.sort, v => { st.sort = v; reload(); }),
+        h('button', { class: 'mchip' + (st.idle ? ' on' : ''), onclick: () => { st.idle = st.idle ? '' : '1'; renderMobileStock(root, ctx); } },
+          'Idle 30d+'))),
+    h('div', { class: 'mflow' }, label(st.idle ? 'Idle over 30 days' : 'Stock by warehouse', count), list.el)));
   reload();
 }
 
@@ -274,12 +288,12 @@ function heroStat(labelText, value, tone) {
 // product/grade, quantity, rate, warehouse, status and delivery.
 export async function renderMobileTape(root, appCtx) {
   ctx = appCtx || ctx;
-  const st = { q: '', side: '', warehouse_id: '' };
+  const st = { q: '', side: '', warehouse_id: '', sort: ctx.tapeSort || 'newest' };
   const whs = await api.warehouses({ limit: 100 });
   const count = countEl();
   const list = pagedList({ pageSize: 20, load: p => api.deals(p), onPage: count.update, row: d => dealCard(d, () => reload()),
     empty: () => h('div', { class: 'empty' }, h('h3', {}, 'No deals')) });
-  const reload = () => list.reload({ q: st.q, side: st.side, warehouse_id: st.warehouse_id });
+  const reload = () => list.reload({ q: st.q, side: st.side, warehouse_id: st.warehouse_id, sort: st.sort });
 
   const sideChips = h('div', { class: 'mchips g3 filter', style: { padding: '0 0 8px' } });
   const paintChips = () => mount(sideChips, ...[['', 'All'], ['buy', 'Bought'], ['sell', 'Sold']].map(([v, text]) => h('button', {
@@ -295,9 +309,11 @@ export async function renderMobileTape(root, appCtx) {
           { phone: true, name: 'Labdhi-Sauda-Report.xlsx' })),
       msearch('Sauda No., party, product, warehouse', q => { st.q = q; reload(); }),
       sideChips,
-      h('select', { class: 'mselect', onchange: e => { st.warehouse_id = e.target.value; reload(); } },
-        h('option', { value: '' }, 'All warehouses'),
-        ...whs.items.map(w => h('option', { value: w.id }, w.name)))),
+      h('div', { class: 'msort-row' },
+        h('select', { class: 'mselect', onchange: e => { st.warehouse_id = e.target.value; reload(); } },
+          h('option', { value: '' }, 'All warehouses'),
+          ...whs.items.map(w => h('option', { value: w.id }, w.name))),
+        msort('deals', st.sort, v => { st.sort = v; reload(); }))),
     h('div', { class: 'mflow' }, label('Trades', count), list.el)));
   reload();
 }
@@ -424,6 +440,13 @@ export function renderMobileSetup(root, appCtx) {
             `State ${ctx.setupFilter} only · show all`) : null),
     h('div', { class: 'mflow' }, label(cfg.title, count), list.el)));
   list.reload({});
+}
+
+// Sorting on a phone: one line, the same wording as the desktop's filter bar.
+function msort(which, value, onPick) {
+  return h('select', {
+    class: 'mselect msort', onchange: e => onPick(e.target.value)
+  }, ...SORTS[which].map(([v, text]) => h('option', { value: v, selected: v === value || undefined }, 'Sort: ' + text)));
 }
 
 const x = (labelText, call, again) => h('button', { class: 'msetup-x', onclick: e => { e.stopPropagation(); removeRecord(labelText, call, again); } }, '×');

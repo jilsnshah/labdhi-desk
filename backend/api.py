@@ -293,11 +293,11 @@ class AdjustIn(BaseModel):
 def list_positions(q: str = "", include_flat: bool = False, warehouse_id: Optional[int] = None,
                    material_id: Optional[int] = None, grade_id: Optional[int] = None,
                    manufacturer_id: Optional[int] = None, supplier_id: Optional[int] = None,
-                   limit: Optional[int] = None, offset: int = 0):
+                   sort: Optional[str] = None, limit: Optional[int] = None, offset: int = 0):
     return inventory.positions(include_flat=include_flat, q=q, limit=limit, offset=offset,
                                warehouse_id=warehouse_id, material_id=material_id,
                                grade_id=grade_id, manufacturer_id=manufacturer_id,
-                               supplier_id=supplier_id)
+                               supplier_id=supplier_id, sort=sort)
 
 
 @app.get("/api/positions/{product_id}")
@@ -307,10 +307,11 @@ def get_position(product_id: int):
 
 @app.get("/api/stock")
 def list_stock(q: str = "", product_id: Optional[int] = None, warehouse_id: Optional[int] = None,
+               idle: bool = False, sort: Optional[str] = None,
                material_id: Optional[int] = None, grade_id: Optional[int] = None,
                manufacturer_id: Optional[int] = None, limit: Optional[int] = None, offset: int = 0):
     return stock.stock_rows(q, product_id, warehouse_id, material_id, grade_id, manufacturer_id,
-                            limit, offset)
+                            idle=idle, sort=sort, limit=limit, offset=offset)
 
 
 @app.get("/api/stock/lots")
@@ -427,8 +428,8 @@ def list_deals(q: str = "", side: Optional[str] = None, status: Optional[str] = 
                warehouse_id: Optional[int] = None, material_id: Optional[int] = None,
                grade_id: Optional[int] = None, manufacturer_id: Optional[int] = None,
                date_from: Optional[str] = None, date_to: Optional[str] = None,
-               limit: Optional[int] = None, offset: int = 0):
-    return deals.list_deals(limit=limit, offset=offset, q=q, side=side, status=status,
+               sort: Optional[str] = None, limit: Optional[int] = None, offset: int = 0):
+    return deals.list_deals(limit=limit, offset=offset, sort=sort, q=q, side=side, status=status,
                             party_id=party_id, product_id=product_id, warehouse_id=warehouse_id,
                             material_id=material_id, grade_id=grade_id,
                             manufacturer_id=manufacturer_id, date_from=date_from, date_to=date_to)

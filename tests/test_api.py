@@ -191,5 +191,51 @@ class TestEveryEndpoint(unittest.TestCase):
         self.assertEqual(db.settings()["sauda_template"], "")
 
 
+    def test_lists_can_be_sorted_and_only_by_names_they_know(self):
+        """Sorting is picked from a fixed list. A name the server does not know
+        falls back to the usual order instead of reaching into the query."""
+        newest = [d["ref"] for d in api.list_deals(limit=50)["items"]]
+        oldest = [d["ref"] for d in api.list_deals(sort="oldest", limit=50)["items"]]
+        self.assertEqual(newest, list(reversed(oldest)))
+        self.assertEqual(api.list_deals(sort="'; DROP TABLE deals; --", limit=50)["items"][0]["ref"], newest[0])
+
+        dates = [d["deal_date"] for d in api.list_deals(sort="oldest", limit=50)["items"]]
+        self.assertEqual(dates, sorted(dates))
+        values = [d["qty_g"] * d["rate_paise"] for d in api.list_deals(sort="value", limit=50)["items"]]
+        self.assertEqual(values, sorted(values, reverse=True))
+        margins = [d["margin_paise"] for d in api.list_deals(sort="margin", limit=50)["items"]]
+        self.assertEqual(margins, sorted(margins, reverse=True))
+
+        rows = api.list_stock(limit=50)["items"]
+        self.assertEqual([r["stock_g"] for r in rows], sorted((r["stock_g"] for r in rows), reverse=True))
+        low = api.list_stock(sort="stock_low", limit=50)["items"]
+        self.assertEqual([r["stock_g"] for r in low], sorted(r["stock_g"] for r in low))
+        self.assertEqual([r["product"] for r in api.list_stock(sort="rubbish", limit=50)["items"]],
+                         [r["product"] for r in rows])
+        pos = api.list_positions(sort="product", limit=50)["items"]
+        self.assertEqual([p["product"] for p in pos], sorted(p["product"] for p in pos))
+
+    def test_idle_stock_is_exactly_what_the_desk_counts(self):
+        """The desk's "idle for over 30 days" line and the Stock screen's idle
+        filter are the same grams, so tapping the line lands on those rows."""
+        alert = [a for a in api.summary()["attention"] if a["kind"] == "stale"]
+        idle = api.list_stock(idle=True, limit=200)["items"]
+        self.assertEqual(bool(alert), bool(idle))
+        if not alert:
+            return
+        self.assertEqual(sum(r["idle_g"] for r in idle),
+                         sum(l["available_g"] for l in db.q(
+                             """SELECT (l.qty_g - l.qty_allocated_g - l.qty_out_g) AS available_g
+                                FROM lots l JOIN deals d ON d.id = l.deal_id
+                                WHERE l.status='open' AND d.deal_date < date('now','-30 day')""")
+                             if l["available_g"] > 0) if not db.IS_PG else sum(r["idle_g"] for r in idle))
+        for r in idle:
+            self.assertGreater(r["idle_g"], 0)
+            self.assertGreaterEqual(r["age_days"], 30)
+        # every row carries its age, idle or not
+        for r in api.list_stock(limit=200)["items"]:
+            self.assertTrue(r["age_days"] is None or r["age_days"] >= 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

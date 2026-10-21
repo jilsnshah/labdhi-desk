@@ -4,6 +4,7 @@ import { h, mount, toast, searchBar } from './ui.js';
 import * as f from './fmt.js';
 import { api } from './api.js';
 import { makeFilters } from './filters.js';
+import { sortField } from './sorts.js';
 import { pagedList, counter } from './lists.js';
 import { STOCK_FILTERS, loadStockFilterOptions } from './desk.js';
 import { lotActions } from './tape.js';
@@ -36,8 +37,9 @@ export function renderStock(root, ctx) {
   const count = counter();
   const list = pagedList({
     pageSize: 25, className: 'stock',
-    head: ['Product', 'Warehouse', { label: 'In stock (MT)', cls: 'r' }, { label: 'Lots', cls: 'r' },
-           { label: 'Avg cost (₹/kg)', cls: 'r' }, { label: 'Value', cls: 'r' }, { label: 'Mark (₹/kg)', cls: 'r' }],
+    head: ['Product', 'Warehouse', { label: 'In stock (MT)', cls: 'r' }, { label: 'Oldest', cls: 'r' },
+           { label: 'Lots', cls: 'r' }, { label: 'Avg cost (₹/kg)', cls: 'r' }, { label: 'Value', cls: 'r' },
+           { label: 'Mark (₹/kg)', cls: 'r' }],
     load: p => api.stock(p),
     row: r => stockRow(r, afterMove),
     onPage: count.update,
@@ -60,9 +62,13 @@ export function renderStock(root, ctx) {
   function afterMove() { reload(); whs.reload(); ctx.refresh(); }
 
   const ui = makeFilters({
-    fields: STOCK_FILTERS,
+    fields: [...STOCK_FILTERS, sortField('stock'),
+             { key: 'idle', type: 'chips', label: 'Age',
+               chips: [{ value: '', label: 'All' }, { value: '1', label: 'Idle over 30 days' }] }],
     onChange: v => { filters = v; loadStockFilterOptions(ui); reload(); }
   });
+  // the desk's "idle for over 30 days" line lands here, on those rows
+  if (ctx.stockIdle) { ui.set('idle', '1'); ui.set('sort', 'idle'); ctx.stockIdle = false; }
   loadStockFilterOptions(ui);
 
   mount(root, h('div', { class: 'view' },
@@ -89,13 +95,16 @@ function stockRow(r, after) {
     h('td', {}, r.warehouse),
     h('td', { class: 'r mono strong' + f.neg(r.stock_g), title: r.short_g ? `${f.qty(r.short_g)} sold short here` : null },
       f.mt(r.stock_g)),
+    h('td', { class: 'r mono' }, r.age_days === null || r.age_days === undefined ? '—'
+      : h('span', { class: r.idle_g ? 'idle-tag' : '', title: r.idle_g ? `${f.qty(r.idle_g)} bought over 30 days ago` : null },
+          `${r.age_days}d`)),
     h('td', { class: 'r mono' }, r.lots),
     h('td', { class: 'r mono' }, r.lots ? f.perKg(r.cost_paise) : '—'),
     h('td', { class: 'r mono' }, r.lots ? f.inr(r.stock_value_paise, { compact: true }) : h('span', { class: 'neg' }, 'sold short')),
     h('td', { class: 'r mono' }, r.mark_paise ? f.perKg(r.mark_paise) : '—'));
   tr.addEventListener('click', async () => {
     if (open) { open.remove(); open = null; tr.classList.remove('open'); return; }
-    open = h('tr', { class: 'deal-detail' }, h('td', { colspan: 7 }, await stockDetail(r, after)));
+    open = h('tr', { class: 'deal-detail' }, h('td', { colspan: 8 }, await stockDetail(r, after)));
     tr.after(open); tr.classList.add('open');
   });
   return tr;

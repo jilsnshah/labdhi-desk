@@ -5,6 +5,7 @@ import * as f from './fmt.js';
 import { api } from './api.js';
 import { ladder, whTags } from './desk.js';
 import { makeFilters } from './filters.js';
+import { sortField } from './sorts.js';
 import { pagedList, counter } from './lists.js';
 import { showNode } from './flow.js';
 import { transferForm, adjustForm } from './forms.js';
@@ -40,7 +41,8 @@ export async function renderTape(root, ctx) {
       { key: 'warehouse_id', label: 'Warehouse', any: 'All warehouses' },
       { key: 'material_id', label: 'Material', clears: ['grade_id'] },
       { key: 'grade_id', label: 'Grade', needs: 'material_id', needsLabel: 'material' },
-      { key: 'manufacturer_id', label: 'Manufacturer' }
+      { key: 'manufacturer_id', label: 'Manufacturer' },
+      sortField('deals', ctx.tapeSort || '')
     ],
     onChange: v => { filters = v; options(); reload(); }
   });

@@ -874,3 +874,4 @@ body:has(.wa-card) #toasts{top:calc(12px + env(safe-area-inset-top,0px));bottom:
 .msg-group .chip.mono{font-family:var(--mono);font-size:12.5px;padding:7px 10px}
 /* a hidden element stays hidden, whatever display its class asks for */
 [hidden]{display:none !important}
+.idle-tag{display:inline-block;padding:2px 7px;border-radius:999px;background:#fff6e0;color:#8a6100;font-weight:700;font-size:12px}

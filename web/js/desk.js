@@ -2,6 +2,7 @@
 import { h, mount, costTint, pnlClass, countUp, searchBar } from './ui.js';
 import { api } from './api.js';
 import { makeFilters } from './filters.js';
+import { sortField } from './sorts.js';
 import { pagedList, counter } from './lists.js';
 import * as f from './fmt.js';
 
@@ -70,7 +71,8 @@ export function renderDesk(root, s, ctx) {
   const reload = () => list.reload({ q: query, ...filters });
 
   const ui = makeFilters({
-    fields: [...STOCK_FILTERS, { key: 'supplier_id', label: 'Bought from', any: 'Any supplier' }],
+    fields: [...STOCK_FILTERS, { key: 'supplier_id', label: 'Bought from', any: 'Any supplier' },
+             sortField('positions')],
     onChange: v => { filters = v; loadStockFilterOptions(ui, { suppliers: true }); reload(); }
   });
   loadStockFilterOptions(ui, { suppliers: true });
@@ -82,7 +84,12 @@ export function renderDesk(root, s, ctx) {
         h('div', { class: 'value num', style: { color: tone } }, value),
         h('div', { class: 'sub' }, sub)))),
     s.attention.length ? h('div', { class: 'alerts' },
-      ...s.attention.map(a => h('div', { class: 'alert ' + a.level, onclick: () => (a.deal_id ? ctx.openDeal(a.deal_id) : a.route && ctx.go(a.route)) },
+      ...s.attention.map(a => h('div', { class: 'alert ' + a.level, onclick: () => {
+        if (a.deal_id) return ctx.openDeal(a.deal_id);
+        if (a.kind === 'stale') ctx.stockIdle = true;      // open Stock on exactly those rows
+        if (a.kind === 'short') ctx.tapeSort = 'newest';
+        return a.route && ctx.go(a.route);
+      } },
         h('i', { class: 'bar' }),
         h('div', {}, h('b', {}, a.title), h('div', {}, h('span', {}, a.detail)))))) : null,
     h('div', { class: 'section-head' }, h('h2', {}, 'Positions'), h('i', { class: 'rule' }), count),

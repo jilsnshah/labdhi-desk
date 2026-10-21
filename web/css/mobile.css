@@ -618,3 +618,6 @@ body.phone.trading #toasts { bottom: calc(90px + env(safe-area-inset-bottom, 0px
 .msg-preview { max-height: 240px; font-size: 12px; }
 .msg-actions .form-save, .msg-actions .form-cancel { flex: 1; text-align: center; }
 .wa-tab { padding: 9px 10px; font-size: 13.5px; }
+.msort-row { display: flex; gap: 8px; align-items: center; }
+.msort-row .mselect { flex: 1; min-width: 0; }
+.msort-row .mchip { flex: 0 0 auto; }
