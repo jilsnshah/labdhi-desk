@@ -1,0 +1,18 @@
+# Everything the container does not need: the local book, the test suites, the
+# phone app project, scratch files and anything carrying a secret.
+.git
+.github
+.venv
+data
+tests
+android
+scratchpad
+*.xlsx
+*.db
+*.db-wal
+*.db-shm
+__pycache__
+**/__pycache__
+*.pyc
+.DS_Store
+image.png

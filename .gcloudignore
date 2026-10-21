@@ -1,0 +1,16 @@
+# What must never leave this machine, and what the container does not need.
+# `gcloud run deploy --source .` uploads everything not listed here.
+.git/
+.github/
+.venv/
+data/                  # the local SQLite book
+*.xlsx                 # party ledgers - real customer data
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+requirements-dev.txt
+render.yaml
